@@ -31,3 +31,5 @@ http://YOUR_SERVER_IP:8787
 ## Notes
 
 This uses Torn's read-only API and only displays status data available through the API. Keep your API key private and avoid exposing this app directly to the public internet without adding authentication.
+
+Arrival countdowns are estimates based on when the dashboard first observes a player traveling. Flights already underway when the application starts or restarts receive a full-duration estimate; flights detected afterward should be accurate to roughly the configured polling interval.
