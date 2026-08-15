@@ -206,6 +206,11 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/hospital")
+def hospital():
+    return render_template("hospital.html")
+
+
 @app.route("/api/status")
 def api_status():
     with lock:
