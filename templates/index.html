@@ -95,13 +95,20 @@ function memberRow(m){
 }
 
 function arrivalInfo(m){
-  if(!m.until || !['Traveling','Returning'].includes(m.state)) return '';
+  if(!['Traveling','Returning'].includes(m.state)) return '';
+  const until = m.until || m.estimated_until;
+  if(!until){
+    return '<div class="arrival unavailable">Arrival time unavailable from Torn API</div>';
+  }
   const label = m.state === 'Returning' ? 'Returns' : 'Lands';
-  const time = new Date(m.until * 1000);
+  const displayLabel = m.arrival_estimated
+    ? (m.state === 'Returning' ? 'Estimated return' : 'Estimated landing')
+    : label;
+  const time = new Date(until * 1000);
   const arrivalTime = time.toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
   return `<div class="arrival">
-    ${label} at <time datetime="${time.toISOString()}" title="${esc(time.toLocaleString())}">${esc(arrivalTime)}</time>
-    <span class="countdown" data-until="${m.until}"></span>
+    ${displayLabel} at <time datetime="${time.toISOString()}" title="${esc(time.toLocaleString())}">${esc(arrivalTime)}</time>
+    <span class="countdown" data-until="${until}"></span>
   </div>`;
 }
 

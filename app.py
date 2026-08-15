@@ -27,6 +27,7 @@ state = {
     "members": [],
     "changes": [],
     "last_seen": {},
+    "travel_observed": {},
 }
 
 COUNTRIES = [
@@ -54,6 +55,23 @@ COUNTRY_ALIASES = {
 # or hospitalized there. Returning enemies do not make that foreign country
 # unsafe, because they are headed back to Torn.
 UNSAFE_DESTINATION_STATES = {"Traveling", "Abroad", "Hospital"}
+
+# One-way base travel times in seconds. When Torn does not expose an enemy's
+# arrival timestamp, the dashboard adds the route time to the first poll where
+# that flight is observed. The resulting ETA can be late by up to one poll.
+TRAVEL_SECONDS = {
+    "Mexico": 1600,
+    "Cayman Islands": 2100,
+    "Canada": 2500,
+    "Hawaii": 8100,
+    "United Kingdom": 9600,
+    "Argentina": 10000,
+    "Switzerland": 10500,
+    "Japan": 13500,
+    "China": 14500,
+    "UAE": 16200,
+    "South Africa": 17800,
+}
 
 
 def api_get_faction_basic():
@@ -85,7 +103,7 @@ def classify_member(member_id, member):
     text = combined.lower()
     if "hospital" in text:
         travel_state = "Hospital"
-    elif "return" in text:
+    elif "return" in text or re.search(r"\bto torn\b", text):
         travel_state = "Returning"
     elif "travel" in text:
         travel_state = "Traveling"
@@ -133,7 +151,24 @@ def poll_once():
     new_changes = []
     with lock:
         old = state["last_seen"]
+        observed = state["travel_observed"]
+        active_flights = set()
         for m in members:
+            if m["state"] in ["Traveling", "Returning"] and m["destination"] in TRAVEL_SECONDS:
+                active_flights.add(m["id"])
+                flight_key = f"{m['state']}|{m['destination']}"
+                flight = observed.get(m["id"])
+                if not flight or flight["key"] != flight_key:
+                    flight = {
+                        "key": flight_key,
+                        "observed_at": now,
+                        "estimated_until": now + TRAVEL_SECONDS[m["destination"]],
+                    }
+                    observed[m["id"]] = flight
+                if not m["until"]:
+                    m["estimated_until"] = flight["estimated_until"]
+                    m["arrival_estimated"] = True
+
             key = f"{m['state']}|{m['destination']}|{m['status_text']}|{m['until']}"
             if m["id"] in old and old[m["id"]] != key:
                 new_changes.append({
@@ -145,6 +180,10 @@ def poll_once():
                     "destination": m["destination"],
                 })
             old[m["id"]] = key
+
+        for member_id in list(observed):
+            if member_id not in active_flights:
+                del observed[member_id]
 
         state["members"] = members
         state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
