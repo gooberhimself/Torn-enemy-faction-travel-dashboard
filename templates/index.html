@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Torn Enemy Travel</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Enemy Travel</h1>
+    <div id="updated">Loading…</div>
+    <div id="error"></div>
+  </header>
+
+  <section class="cards">
+    <div class="card"><div class="num" id="traveling">0</div><div>Traveling</div></div>
+    <div class="card"><div class="num" id="abroad">0</div><div>Abroad</div></div>
+    <div class="card"><div class="num" id="returning">0</div><div>Returning</div></div>
+  </section>
+
+  <section>
+    <h2>Safe locations</h2>
+    <div id="safeLocations"></div>
+    <div class="hint">Safe means no enemy is currently abroad there, traveling there, or hospitalized there. Returning enemies do not mark that location unsafe.</div>
+  </section>
+
+  <section>
+    <h2>By destination</h2>
+    <div id="destinations"></div>
+  </section>
+
+  <section>
+    <h2>Live changes</h2>
+    <div id="changes"></div>
+  </section>
+
+  <section>
+    <h2>All members</h2>
+    <input id="filter" placeholder="Filter name/status/destination">
+    <div id="members"></div>
+  </section>
+
+<script>
+let latest = null;
+const important = new Set(['Traveling','Abroad','Returning','Hospital']);
+
+async function refresh(){
+  const res = await fetch('/api/status', {cache:'no-store'});
+  latest = await res.json();
+  render();
+}
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function render(){
+  if(!latest) return;
+  document.getElementById('updated').textContent = latest.updated_at ? `Updated ${latest.updated_at}` : 'Waiting for first poll…';
+  document.getElementById('error').textContent = latest.error ? latest.error : '';
+
+  const counts = {Traveling:0, Abroad:0, Returning:0};
+  latest.members.forEach(m => { if(counts[m.state] !== undefined) counts[m.state]++; });
+  document.getElementById('traveling').textContent = counts.Traveling;
+  document.getElementById('abroad').textContent = counts.Abroad;
+  document.getElementById('returning').textContent = counts.Returning;
+
+  const safe = document.getElementById('safeLocations');
+  safe.innerHTML = latest.safe_locations && latest.safe_locations.length
+    ? latest.safe_locations.map(loc => `<span class="pill safe">${esc(loc)}</span>`).join('')
+    : '<div class="empty danger">No safe travel locations visible right now.</div>';
+
+  const dest = document.getElementById('destinations');
+  const keys = Object.keys(latest.grouped).sort();
+  dest.innerHTML = keys.length ? keys.map(k => `
+    <details open class="group"><summary>${esc(k)} <b>${latest.grouped[k].length}</b></summary>
+      ${latest.grouped[k].map(memberRow).join('')}
+    </details>`).join('') : '<div class="empty">No visible enemy travel right now.</div>';
+
+  const changes = document.getElementById('changes');
+  changes.innerHTML = latest.changes.length ? latest.changes.map(c => `
+    <div class="change"><b>${esc(c.time)}</b> ${esc(c.name)} → ${esc(c.new)}</div>`).join('') : '<div class="empty">No changes yet.</div>';
+
+  renderMembers();
+}
+
+function memberRow(m){
+  const cls = important.has(m.state) ? 'hot' : '';
+  return `<a class="member ${cls}" href="${m.profile_url}" target="_blank">
+    <div><b>${esc(m.name)}</b> <span class="muted">[${esc(m.id)}]</span></div>
+    <div>${esc(m.state)} ${m.destination ? '• ' + esc(m.destination) : ''}</div>
+    <small>${esc(m.status_text)} ${m.until_text ? '• until ' + esc(m.until_text) : ''}</small>
+  </a>`;
+}
+
+function renderMembers(){
+  const q = document.getElementById('filter').value.toLowerCase();
+  const list = latest.members.filter(m => JSON.stringify(m).toLowerCase().includes(q));
+  document.getElementById('members').innerHTML = list.map(memberRow).join('');
+}
+
+document.getElementById('filter').addEventListener('input', renderMembers);
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
