@@ -85,22 +85,54 @@ function render(){
 
 function memberRow(m){
   const cls = important.has(m.state) ? 'hot' : '';
+  const arrival = arrivalInfo(m);
   return `<a class="member ${cls}" href="${m.profile_url}" target="_blank">
     <div><b>${esc(m.name)}</b> <span class="muted">[${esc(m.id)}]</span></div>
     <div>${esc(m.state)} ${m.destination ? '• ' + esc(m.destination) : ''}</div>
-    <small>${esc(m.status_text)} ${m.until_text ? '• until ' + esc(m.until_text) : ''}</small>
+    <small>${esc(m.status_text)}</small>
+    ${arrival}
   </a>`;
+}
+
+function arrivalInfo(m){
+  if(!m.until || !['Traveling','Returning'].includes(m.state)) return '';
+  const label = m.state === 'Returning' ? 'Returns' : 'Lands';
+  const time = new Date(m.until * 1000);
+  const arrivalTime = time.toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
+  return `<div class="arrival">
+    ${label} at <time datetime="${time.toISOString()}" title="${esc(time.toLocaleString())}">${esc(arrivalTime)}</time>
+    <span class="countdown" data-until="${m.until}"></span>
+  </div>`;
+}
+
+function updateCountdowns(){
+  const now = Date.now();
+  document.querySelectorAll('.countdown').forEach(el => {
+    const remaining = Math.max(0, Number(el.dataset.until) * 1000 - now);
+    if(remaining <= 0){
+      el.textContent = '(arriving now)';
+      return;
+    }
+    const totalSeconds = Math.ceil(remaining / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const parts = hours ? [hours, minutes, seconds] : [minutes, seconds];
+    el.textContent = `(${parts.map(n => String(n).padStart(2, '0')).join(':')} remaining)`;
+  });
 }
 
 function renderMembers(){
   const q = document.getElementById('filter').value.toLowerCase();
   const list = latest.members.filter(m => JSON.stringify(m).toLowerCase().includes(q));
   document.getElementById('members').innerHTML = list.map(memberRow).join('');
+  updateCountdowns();
 }
 
 document.getElementById('filter').addEventListener('input', renderMembers);
 refresh();
 setInterval(refresh, 30000);
+setInterval(updateCountdowns, 1000);
 </script>
 </body>
 </html>
