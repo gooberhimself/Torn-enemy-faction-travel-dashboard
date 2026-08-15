@@ -79,15 +79,18 @@ def classify_member(member_id, member):
     destination = ""
 
     # Examples seen in Torn status fields: Traveling, Abroad, Returning, Okay, Hospital.
+    # Check the mutually exclusive states in priority order. A traveling status
+    # normally includes a country name, but that does not mean the member has
+    # already arrived abroad.
     text = combined.lower()
-    if "travel" in text:
-        travel_state = "Traveling"
-    if "abroad" in text or any(c.lower() in text for c in COUNTRIES):
-        travel_state = "Abroad"
-    if "return" in text:
-        travel_state = "Returning"
     if "hospital" in text:
         travel_state = "Hospital"
+    elif "return" in text:
+        travel_state = "Returning"
+    elif "travel" in text:
+        travel_state = "Traveling"
+    elif "abroad" in text or any(c.lower() in text for c in COUNTRIES):
+        travel_state = "Abroad"
 
     for country in COUNTRIES:
         aliases = COUNTRY_ALIASES.get(country, [country.lower()])
