@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enemy Activity</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="activity-page">
+  <header>
+    <div class="header-row">
+      <h1>Enemy Activity</h1>
+      <nav><a href="/">Travel</a><a href="/hospital">Hospital</a></nav>
+    </div>
+    <div id="activityUpdated">Loading…</div>
+    <div id="error"></div>
+  </header>
+
+  <main class="activity-main">
+    <div class="activity-toolbar">
+      <button id="previousDay" type="button" aria-label="Previous day">← Previous</button>
+      <label>
+        <span class="sr-only">Activity date</span>
+        <input id="activityDate" type="date">
+      </label>
+      <button id="nextDay" type="button" aria-label="Next day">Next →</button>
+    </div>
+
+    <h2 id="activityTitle">Activity</h2>
+    <p class="hint activity-hint">Green blocks show when a successful faction poll observed a player online. Times between missing polls are not filled in.</p>
+
+    <div id="activityEmpty" class="empty" hidden></div>
+    <div id="activityScroll" class="activity-scroll" hidden>
+      <div class="activity-chart">
+        <div class="activity-corner">Player</div>
+        <div id="hourHeader" class="hour-header"></div>
+        <div id="activityRows" class="activity-rows"></div>
+      </div>
+    </div>
+  </main>
+
+<script>
+let activity = null;
+
+function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+function localDateString(date){
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function shiftedDate(dateString, amount){
+  const value = new Date(`${dateString}T12:00:00`);
+  value.setDate(value.getDate() + amount);
+  return localDateString(value);
+}
+
+function formatMinute(value){
+  const total = Math.max(0, Math.min(1440, Math.round(value)));
+  if(total === 1440) return '24:00';
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+async function loadActivity(dateString = ''){
+  try {
+    const url = dateString ? `/api/activity?date=${encodeURIComponent(dateString)}` : '/api/activity';
+    const response = await fetch(url, {cache:'no-store'});
+    const payload = await response.json();
+    if(!response.ok) throw new Error(payload.error || `Activity request failed (${response.status})`);
+    activity = payload;
+    renderActivity();
+  } catch(error) {
+    document.getElementById('error').textContent = error.message;
+  }
+}
+
+function renderHourHeader(){
+  document.getElementById('hourHeader').innerHTML = Array.from({length:25}, (_, hour) => {
+    const position = hour / 24 * 100;
+    return `<span class="hour-label" style="left:${position}%">${String(hour % 24).padStart(2, '0')}:00</span>`;
+  }).join('');
+}
+
+function renderActivity(){
+  const dateInput = document.getElementById('activityDate');
+  dateInput.value = activity.date;
+  dateInput.max = activity.today;
+  dateInput.min = activity.earliest_date;
+  document.getElementById('previousDay').disabled = activity.date <= activity.earliest_date;
+  document.getElementById('nextDay').disabled = activity.date >= activity.today;
+  document.getElementById('activityTitle').textContent = new Date(`${activity.date}T12:00:00`).toLocaleDateString([], {
+    weekday:'long', year:'numeric', month:'long', day:'numeric'
+  });
+  document.getElementById('activityUpdated').textContent = `Activity through ${new Date(activity.generated_at * 1000).toLocaleTimeString()}`;
+  document.getElementById('error').textContent = '';
+
+  const empty = document.getElementById('activityEmpty');
+  const scroll = document.getElementById('activityScroll');
+  if(!activity.players.length){
+    empty.textContent = 'No faction members have been recorded yet. Activity will appear after the first successful poll.';
+    empty.hidden = false;
+    scroll.hidden = true;
+    return;
+  }
+  empty.hidden = true;
+  scroll.hidden = false;
+  renderHourHeader();
+
+  document.getElementById('activityRows').innerHTML = activity.players.map(player => {
+    const blocks = player.intervals.map(interval => {
+      const start = Math.max(0, Math.min(1440, interval.start_minute));
+      const end = Math.max(start, Math.min(1440, interval.end_minute));
+      const left = start / 1440 * 100;
+      const width = (end - start) / 1440 * 100;
+      return `<span class="activity-block" style="left:${left}%;width:${width}%" title="Observed online ${formatMinute(start)}–${formatMinute(end)}"></span>`;
+    }).join('');
+    const currentLine = activity.current_minute === null ? '' : '<span class="current-time-line"></span>';
+    return `<div class="activity-row">
+      <a class="activity-player" href="${player.profile_url}" target="_blank" rel="noopener" title="${esc(player.name)}">${esc(player.name)}</a>
+      <div class="activity-track">${blocks}${currentLine}</div>
+    </div>`;
+  }).join('');
+  updateCurrentTimeLine();
+}
+
+function updateCurrentTimeLine(){
+  if(!activity || activity.current_minute === null) return;
+  const elapsedMinutes = (Date.now() / 1000 - activity.generated_at) / 60;
+  const currentMinute = Math.max(0, Math.min(1440, activity.current_minute + elapsedMinutes));
+  document.querySelectorAll('.current-time-line').forEach(line => {
+    line.style.left = `${currentMinute / 1440 * 100}%`;
+  });
+}
+
+document.getElementById('activityDate').addEventListener('change', event => loadActivity(event.target.value));
+document.getElementById('previousDay').addEventListener('click', () => loadActivity(shiftedDate(activity.date, -1)));
+document.getElementById('nextDay').addEventListener('click', () => loadActivity(shiftedDate(activity.date, 1)));
+
+loadActivity();
+setInterval(() => activity && loadActivity(activity.date), 30000);
+setInterval(updateCurrentTimeLine, 30000);
+</script>
+</body>
+</html>

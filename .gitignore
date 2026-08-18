@@ -8,6 +8,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Runtime activity history
+activity.db
+activity.db-shm
+activity.db-wal
+
 # Virtual environments
 .venv/
 venv/
