@@ -45,12 +45,15 @@ The `/activity` page displays observed enemy activity on a 24-hour timeline.
 - Uses hourly grid lines from `00:00` through the following `00:00`.
 - Shows a red current-time indicator when viewing today.
 - Supports previous-day, next-day, and date-picker navigation without allowing future dates.
+- Converts dates, hour positions, activity blocks, and the current-time indicator to each viewer's browser timezone.
 - Scrolls horizontally on smaller screens so the hourly timeline remains readable.
 - Links player names directly to their Torn profiles.
 
 Activity is based specifically on each faction member's `last_action.status` value from the same faction API response already used by the travel dashboard. `Idle` and `Offline` are not counted as online. No additional Torn API requests or per-player requests are made for activity tracking.
 
 The graph represents observations, not exact login and logout times. Its resolution depends on `POLL_SECONDS`, normally about one minute. Missing or failed polls are not filled in, so API outages and application downtime are not presented as known online activity.
+
+The browser sends its IANA timezone name, such as `America/Chicago` or `Europe/Stockholm`, to `/api/activity`. Flask uses Python's built-in `zoneinfo` support to query the correct local calendar day and position intervals on that viewer's local 24-hour clock. Cloudflare Tunnel requires no timezone configuration and simply passes the request through normally.
 
 #### Activity database
 

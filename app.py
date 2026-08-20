@@ -4,6 +4,7 @@ import sqlite3
 import time
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from threading import Lock, Thread
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from dotenv import load_dotenv
@@ -17,6 +18,25 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8787"))
 ACTIVITY_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "activity.db")
+
+
+def detect_server_timezone():
+    """Find an IANA name for API clients that do not supply a timezone."""
+    candidates = [os.getenv("TZ", "").strip()]
+    localtime_path = os.path.realpath("/etc/localtime")
+    if "/zoneinfo/" in localtime_path:
+        candidates.append(localtime_path.split("/zoneinfo/", 1)[1])
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return ZoneInfo(candidate).key
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return "UTC"
+
+
+DEFAULT_ACTIVITY_TIMEZONE = detect_server_timezone()
 
 if not API_KEY or not FACTION_ID:
     print("Missing TORN_API_KEY or ENEMY_FACTION_ID. Copy .env.example to .env and edit it.")
@@ -195,19 +215,19 @@ def record_activity_observations(members, observed_at):
                 """, (end_time, open_interval["id"]))
 
 
-def local_day_bounds(day):
-    """Return Unix timestamps for local midnight at the start/end of a date."""
-    start = datetime.combine(day, datetime_time.min)
-    end = datetime.combine(day + timedelta(days=1), datetime_time.min)
-    return int(time.mktime(start.timetuple())), int(time.mktime(end.timetuple()))
+def local_day_bounds(day, viewer_timezone):
+    """Return Unix timestamps for midnight in the viewer's timezone."""
+    start = datetime.combine(day, datetime_time.min, tzinfo=viewer_timezone)
+    end = datetime.combine(day + timedelta(days=1), datetime_time.min, tzinfo=viewer_timezone)
+    return int(start.timestamp()), int(end.timestamp())
 
 
-def timestamp_minutes_for_day(timestamp, day, day_start, day_end):
+def timestamp_minutes_for_day(timestamp, day, day_start, day_end, viewer_timezone):
     if timestamp <= day_start:
         return 0
     if timestamp >= day_end:
         return 1440
-    local_time = datetime.fromtimestamp(timestamp)
+    local_time = datetime.fromtimestamp(timestamp, viewer_timezone)
     if local_time.date() < day:
         return 0
     if local_time.date() > day:
@@ -215,8 +235,10 @@ def timestamp_minutes_for_day(timestamp, day, day_start, day_end):
     return local_time.hour * 60 + local_time.minute + local_time.second / 60
 
 
-def activity_for_day(day):
-    day_start, day_end = local_day_bounds(day)
+def activity_for_day(day, timezone_name=DEFAULT_ACTIVITY_TIMEZONE):
+    viewer_timezone = ZoneInfo(timezone_name)
+    viewer_today = datetime.now(viewer_timezone).date()
+    day_start, day_end = local_day_bounds(day, viewer_timezone)
     generated_at = int(time.time())
     with activity_db() as connection:
         players = connection.execute("""
@@ -238,10 +260,10 @@ def activity_for_day(day):
     intervals_by_player = {}
     for interval in intervals:
         start_minute = timestamp_minutes_for_day(
-            interval["start_time"], day, day_start, day_end
+            interval["start_time"], day, day_start, day_end, viewer_timezone
         )
         end_minute = timestamp_minutes_for_day(
-            interval["end_time"], day, day_start, day_end
+            interval["end_time"], day, day_start, day_end, viewer_timezone
         )
         if end_minute <= start_minute:
             continue
@@ -252,14 +274,17 @@ def activity_for_day(day):
 
     return {
         "date": day.isoformat(),
-        "today": date.today().isoformat(),
+        "today": viewer_today.isoformat(),
+        "timezone": viewer_timezone.key,
         "generated_at": generated_at,
         "current_minute": (
-            timestamp_minutes_for_day(generated_at, day, day_start, day_end)
-            if day == date.today() else None
+            timestamp_minutes_for_day(
+                generated_at, day, day_start, day_end, viewer_timezone
+            ) if day == viewer_today else None
         ),
         "earliest_date": (
-            datetime.fromtimestamp(earliest).date().isoformat() if earliest else date.today().isoformat()
+            datetime.fromtimestamp(earliest, viewer_timezone).date().isoformat()
+            if earliest else viewer_today.isoformat()
         ),
         "players": [{
             "id": row["player_id"],
@@ -427,14 +452,21 @@ def activity():
 
 @app.route("/api/activity")
 def api_activity():
-    requested_date = request.args.get("date", date.today().isoformat())
+    timezone_name = request.args.get("timezone", DEFAULT_ACTIVITY_TIMEZONE)
+    try:
+        viewer_timezone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return jsonify({"error": "Unknown timezone."}), 400
+
+    viewer_today = datetime.now(viewer_timezone).date()
+    requested_date = request.args.get("date", viewer_today.isoformat())
     try:
         selected_date = date.fromisoformat(requested_date)
     except ValueError:
         return jsonify({"error": "Date must use YYYY-MM-DD format."}), 400
-    if selected_date > date.today():
+    if selected_date > viewer_today:
         return jsonify({"error": "Future activity dates are not available."}), 400
-    return jsonify(activity_for_day(selected_date))
+    return jsonify(activity_for_day(selected_date, viewer_timezone.key))
 
 
 @app.route("/api/status")

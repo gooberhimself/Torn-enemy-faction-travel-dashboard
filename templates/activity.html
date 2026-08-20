@@ -27,6 +27,7 @@
     </div>
 
     <h2 id="activityTitle">Activity</h2>
+    <p id="activityTimezone" class="hint activity-hint"></p>
     <p class="hint activity-hint">Green blocks show when a successful faction poll observed a player online. Times between missing polls are not filled in.</p>
 
     <div id="activityEmpty" class="empty" hidden></div>
@@ -41,6 +42,7 @@
 
 <script>
 let activity = null;
+const viewerTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
@@ -65,7 +67,9 @@ function formatMinute(value){
 
 async function loadActivity(dateString = ''){
   try {
-    const url = dateString ? `/api/activity?date=${encodeURIComponent(dateString)}` : '/api/activity';
+    const params = new URLSearchParams({timezone: viewerTimezone});
+    if(dateString) params.set('date', dateString);
+    const url = `/api/activity?${params.toString()}`;
     const response = await fetch(url, {cache:'no-store'});
     const payload = await response.json();
     if(!response.ok) throw new Error(payload.error || `Activity request failed (${response.status})`);
@@ -90,10 +94,13 @@ function renderActivity(){
   dateInput.min = activity.earliest_date;
   document.getElementById('previousDay').disabled = activity.date <= activity.earliest_date;
   document.getElementById('nextDay').disabled = activity.date >= activity.today;
-  document.getElementById('activityTitle').textContent = new Date(`${activity.date}T12:00:00`).toLocaleDateString([], {
-    weekday:'long', year:'numeric', month:'long', day:'numeric'
+  document.getElementById('activityTitle').textContent = new Date(`${activity.date}T00:00:00Z`).toLocaleDateString([], {
+    timeZone:'UTC', weekday:'long', year:'numeric', month:'long', day:'numeric'
   });
-  document.getElementById('activityUpdated').textContent = `Activity through ${new Date(activity.generated_at * 1000).toLocaleTimeString()}`;
+  document.getElementById('activityTimezone').textContent = `Times shown in ${activity.timezone}`;
+  document.getElementById('activityUpdated').textContent = `Activity through ${new Date(activity.generated_at * 1000).toLocaleTimeString([], {
+    timeZone:activity.timezone, timeZoneName:'short'
+  })}`;
   document.getElementById('error').textContent = '';
 
   const empty = document.getElementById('activityEmpty');
