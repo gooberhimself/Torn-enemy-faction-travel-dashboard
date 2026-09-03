@@ -103,6 +103,92 @@ def activity_db():
     return connection
 
 
+def create_activity_schema(connection):
+    statements = (
+        """CREATE TABLE IF NOT EXISTS activity_players (
+            faction_id TEXT NOT NULL,
+            player_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            profile_url TEXT NOT NULL,
+            first_seen INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (faction_id, player_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS activity_intervals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            faction_id TEXT NOT NULL,
+            player_id TEXT NOT NULL,
+            start_time INTEGER NOT NULL,
+            end_time INTEGER NOT NULL,
+            last_observed INTEGER NOT NULL,
+            is_open INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (faction_id, player_id)
+                REFERENCES activity_players(faction_id, player_id)
+        )""",
+        """CREATE INDEX IF NOT EXISTS activity_intervals_day
+            ON activity_intervals(faction_id, start_time, end_time)""",
+        """CREATE INDEX IF NOT EXISTS activity_intervals_player
+            ON activity_intervals(faction_id, player_id, start_time)""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS activity_one_open_interval
+            ON activity_intervals(faction_id, player_id) WHERE is_open = 1""",
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
+def migrate_activity_schema(connection):
+    """Add faction ownership to databases created before faction scoping.
+
+    The old schema cannot identify which earlier faction owned inactive rows.
+    Its active roster is the best reliable indicator of the faction currently
+    configured, so those rows retain their history under FACTION_ID. Inactive
+    rows are preserved in a hidden legacy bucket rather than mixed into the
+    current faction or deleted.
+    """
+    current_faction = FACTION_ID or "__legacy__"
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("ALTER TABLE activity_players RENAME TO activity_players_legacy")
+        connection.execute("ALTER TABLE activity_intervals RENAME TO activity_intervals_legacy")
+        connection.execute("DROP INDEX IF EXISTS activity_intervals_day")
+        connection.execute("DROP INDEX IF EXISTS activity_intervals_player")
+        connection.execute("DROP INDEX IF EXISTS activity_one_open_interval")
+        create_activity_schema(connection)
+        connection.execute("""
+            INSERT INTO activity_players
+                (faction_id, player_id, name, profile_url, first_seen, last_seen, active)
+            SELECT
+                CASE WHEN active = 1 THEN ? ELSE '__legacy__' END,
+                player_id, name, profile_url, first_seen, last_seen, active
+            FROM activity_players_legacy
+        """, (current_faction,))
+        connection.execute("""
+            INSERT INTO activity_intervals
+                (id, faction_id, player_id, start_time, end_time, last_observed, is_open)
+            SELECT
+                intervals.id,
+                CASE WHEN players.active = 1 THEN ? ELSE '__legacy__' END,
+                intervals.player_id,
+                intervals.start_time,
+                intervals.end_time,
+                intervals.last_observed,
+                intervals.is_open
+            FROM activity_intervals_legacy AS intervals
+            JOIN activity_players_legacy AS players
+                ON players.player_id = intervals.player_id
+        """, (current_faction,))
+        connection.execute("DROP TABLE activity_intervals_legacy")
+        connection.execute("DROP TABLE activity_players_legacy")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+
 def init_activity_db():
     """Create activity storage and end intervals left open by an old process.
 
@@ -111,33 +197,13 @@ def init_activity_db():
     downtime cannot be mistaken for online activity.
     """
     with activity_db() as connection:
-        connection.executescript("""
-            CREATE TABLE IF NOT EXISTS activity_players (
-                player_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                profile_url TEXT NOT NULL,
-                first_seen INTEGER NOT NULL,
-                last_seen INTEGER NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
-            );
-
-            CREATE TABLE IF NOT EXISTS activity_intervals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                player_id TEXT NOT NULL,
-                start_time INTEGER NOT NULL,
-                end_time INTEGER NOT NULL,
-                last_observed INTEGER NOT NULL,
-                is_open INTEGER NOT NULL DEFAULT 1,
-                FOREIGN KEY (player_id) REFERENCES activity_players(player_id)
-            );
-
-            CREATE INDEX IF NOT EXISTS activity_intervals_day
-                ON activity_intervals(start_time, end_time);
-            CREATE INDEX IF NOT EXISTS activity_intervals_player
-                ON activity_intervals(player_id, start_time);
-            CREATE UNIQUE INDEX IF NOT EXISTS activity_one_open_interval
-                ON activity_intervals(player_id) WHERE is_open = 1;
-        """)
+        player_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(activity_players)")
+        }
+        if player_columns and "faction_id" not in player_columns:
+            migrate_activity_schema(connection)
+        else:
+            create_activity_schema(connection)
         # A previous process cannot vouch for the time while it was stopped.
         connection.execute("UPDATE activity_intervals SET is_open = 0 WHERE is_open = 1")
 
@@ -156,32 +222,36 @@ def record_activity_observations(members, observed_at):
         if member_ids:
             placeholders = ",".join("?" for _ in member_ids)
             connection.execute(
-                f"UPDATE activity_players SET active = 0 WHERE player_id NOT IN ({placeholders})",
-                tuple(member_ids),
+                f"""UPDATE activity_players SET active = 0
+                    WHERE faction_id = ? AND player_id NOT IN ({placeholders})""",
+                (FACTION_ID, *member_ids),
             )
         else:
-            connection.execute("UPDATE activity_players SET active = 0")
+            connection.execute(
+                "UPDATE activity_players SET active = 0 WHERE faction_id = ?",
+                (FACTION_ID,),
+            )
 
         for member in members:
             connection.execute("""
                 INSERT INTO activity_players
-                    (player_id, name, profile_url, first_seen, last_seen, active)
-                VALUES (?, ?, ?, ?, ?, 1)
-                ON CONFLICT(player_id) DO UPDATE SET
+                    (faction_id, player_id, name, profile_url, first_seen, last_seen, active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(faction_id, player_id) DO UPDATE SET
                     name = excluded.name,
                     profile_url = excluded.profile_url,
                     last_seen = excluded.last_seen,
                     active = 1
             """, (
-                member["id"], member["name"], member["profile_url"],
+                FACTION_ID, member["id"], member["name"], member["profile_url"],
                 observed_at, observed_at,
             ))
 
             open_interval = connection.execute("""
                 SELECT id, end_time, last_observed
                 FROM activity_intervals
-                WHERE player_id = ? AND is_open = 1
-            """, (member["id"],)).fetchone()
+                WHERE faction_id = ? AND player_id = ? AND is_open = 1
+            """, (FACTION_ID, member["id"])).fetchone()
             is_online = member["online_status"].casefold() == "online"
 
             if is_online and open_interval:
@@ -202,9 +272,12 @@ def record_activity_observations(members, observed_at):
             if is_online:
                 connection.execute("""
                     INSERT INTO activity_intervals
-                        (player_id, start_time, end_time, last_observed, is_open)
-                    VALUES (?, ?, ?, ?, 1)
-                """, (member["id"], observed_at, observed_at + 1, observed_at))
+                        (faction_id, player_id, start_time, end_time, last_observed, is_open)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                """, (
+                    FACTION_ID, member["id"], observed_at,
+                    observed_at + 1, observed_at,
+                ))
             elif open_interval:
                 gap = observed_at - open_interval["last_observed"]
                 end_time = observed_at if gap <= max_continuous_gap else open_interval["end_time"]
@@ -244,17 +317,19 @@ def activity_for_day(day, timezone_name=DEFAULT_ACTIVITY_TIMEZONE):
         players = connection.execute("""
             SELECT player_id, name, profile_url, active
             FROM activity_players
-            WHERE first_seen < ?
+            WHERE faction_id = ? AND first_seen < ?
             ORDER BY name COLLATE NOCASE, player_id
-        """, (day_end,)).fetchall()
+        """, (FACTION_ID, day_end)).fetchall()
         intervals = connection.execute("""
             SELECT player_id, start_time, end_time
             FROM activity_intervals
-            WHERE start_time < ? AND end_time > ?
+            WHERE faction_id = ? AND start_time < ? AND end_time > ?
             ORDER BY start_time
-        """, (day_end, day_start)).fetchall()
+        """, (FACTION_ID, day_end, day_start)).fetchall()
         earliest = connection.execute(
-            "SELECT MIN(first_seen) AS timestamp FROM activity_players"
+            """SELECT MIN(first_seen) AS timestamp FROM activity_players
+               WHERE faction_id = ?""",
+            (FACTION_ID,),
         ).fetchone()["timestamp"]
 
     intervals_by_player = {}
@@ -276,6 +351,7 @@ def activity_for_day(day, timezone_name=DEFAULT_ACTIVITY_TIMEZONE):
         "date": day.isoformat(),
         "today": viewer_today.isoformat(),
         "timezone": viewer_timezone.key,
+        "faction_id": FACTION_ID,
         "generated_at": generated_at,
         "current_minute": (
             timestamp_minutes_for_day(

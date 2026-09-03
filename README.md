@@ -46,6 +46,7 @@ The `/activity` page displays observed enemy activity on a 24-hour timeline.
 - Shows a red current-time indicator when viewing today.
 - Supports previous-day, next-day, and date-picker navigation without allowing future dates.
 - Converts dates, hour positions, activity blocks, and the current-time indicator to each viewer's browser timezone.
+- Keeps player rosters and activity intervals separated by `ENEMY_FACTION_ID`, so changing war targets does not mix factions on the graph.
 - Scrolls horizontally on smaller screens so the hourly timeline remains readable.
 - Links player names directly to their Torn profiles.
 
@@ -62,6 +63,10 @@ Activity history is stored in `activity.db`, an SQLite database created automati
 To avoid storing one database row per player every minute, consecutive online observations are merged into a single interval. An offline observation closes that interval. If polling is interrupted, the interval ends at the last successful online observation instead of extending across the unknown period.
 
 The database survives browser refreshes, Flask restarts, computer reboots, and periods when the dashboard is stopped. It is excluded from Git by `.gitignore` because it is runtime data. No history is deleted automatically.
+
+Each player and activity interval is stored with the configured `ENEMY_FACTION_ID`. Switching to another faction starts or resumes that faction's separate timeline; switching back restores the earlier faction's known roster and history.
+
+Databases created before faction-scoped storage are upgraded automatically at startup. During this one-time migration, players marked active by the most recent poll are assigned to the currently configured faction. Older inactive players and their intervals are preserved in a hidden legacy scope because the previous schema did not record which faction owned them.
 
 ### Live status changes
 
