@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Torn Enemy Travel</title>
+  <title>Friendly Travel</title>
   <link rel="stylesheet" href="/static/style.css?v=20260818-activity">
 </head>
 <body>
   <header>
     <div class="header-row">
-      <h1>Enemy Travel</h1>
-      <nav><a href="/hospital">Hospital</a><a href="/activity">Activity</a><a href="/friendly">Friendly Travel</a><a href="/friendly/hospital">Friendly Hospital</a></nav>
+      <h1>Friendly Travel</h1>
+      <nav><a href="/">Enemy Travel</a><a href="/hospital">Enemy Hospital</a><a href="/activity">Activity</a><a href="/friendly/hospital">Friendly Hospital</a></nav>
     </div>
     <div id="updated">Loading…</div>
     <div id="error"></div>
@@ -20,12 +20,6 @@
     <div class="card"><div class="num" id="traveling">0</div><div>Traveling</div></div>
     <div class="card"><div class="num" id="abroad">0</div><div>Abroad</div></div>
     <div class="card"><div class="num" id="returning">0</div><div>Returning</div></div>
-  </section>
-
-  <section>
-    <h2>Safe locations</h2>
-    <div id="safeLocations"></div>
-    <div class="hint">Safe means no enemy is currently abroad there, traveling there, or hospitalized there. Returning enemies do not mark that location unsafe.</div>
   </section>
 
   <section>
@@ -49,9 +43,14 @@ let latest = null;
 const important = new Set(['Traveling','Abroad','Returning','Hospital']);
 
 async function refresh(){
-  const res = await fetch('/api/status', {cache:'no-store'});
-  latest = await res.json();
-  render();
+  try {
+    const res = await fetch('/api/friendly/status', {cache:'no-store'});
+    if(!res.ok) throw new Error(`Status request failed (${res.status})`);
+    latest = await res.json();
+    render();
+  } catch(error) {
+    document.getElementById('error').textContent = error.message;
+  }
 }
 
 function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -59,7 +58,7 @@ function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','
 function render(){
   if(!latest) return;
   document.getElementById('updated').textContent = latest.updated_at ? `Updated ${latest.updated_at}` : 'Waiting for first poll…';
-  document.getElementById('error').textContent = latest.error ? latest.error : '';
+  document.getElementById('error').textContent = latest.error || '';
 
   const counts = {Traveling:0, Abroad:0, Returning:0};
   latest.members.forEach(m => { if(counts[m.state] !== undefined) counts[m.state]++; });
@@ -67,46 +66,37 @@ function render(){
   document.getElementById('abroad').textContent = counts.Abroad;
   document.getElementById('returning').textContent = counts.Returning;
 
-  const safe = document.getElementById('safeLocations');
-  safe.innerHTML = latest.safe_locations && latest.safe_locations.length
-    ? latest.safe_locations.map(loc => `<span class="pill safe">${esc(loc)}</span>`).join('')
-    : '<div class="empty danger">No safe travel locations visible right now.</div>';
-
-  const dest = document.getElementById('destinations');
+  const destinations = document.getElementById('destinations');
   const keys = Object.keys(latest.grouped).sort();
-  dest.innerHTML = keys.length ? keys.map(k => `
-    <details open class="group"><summary>${esc(k)} <b>${latest.grouped[k].length}</b></summary>
-      ${latest.grouped[k].map(memberRow).join('')}
-    </details>`).join('') : '<div class="empty">No visible enemy travel right now.</div>';
+  destinations.innerHTML = keys.length ? keys.map(key => `
+    <details open class="group"><summary>${esc(key)} <b>${latest.grouped[key].length}</b></summary>
+      ${latest.grouped[key].map(memberRow).join('')}
+    </details>`).join('') : '<div class="empty">No friendly travel visible right now.</div>';
 
   const changes = document.getElementById('changes');
-  changes.innerHTML = latest.changes.length ? latest.changes.map(c => `
-    <div class="change"><b>${esc(c.time)}</b> ${esc(c.name)} → ${esc(c.new)}</div>`).join('') : '<div class="empty">No changes yet.</div>';
+  changes.innerHTML = latest.changes.length ? latest.changes.map(change => `
+    <div class="change"><b>${esc(change.time)}</b> ${esc(change.name)} → ${esc(change.new)}</div>`).join('') : '<div class="empty">No changes yet.</div>';
 
   renderMembers();
 }
 
-function memberRow(m){
-  const cls = important.has(m.state) ? 'hot' : '';
-  const arrival = arrivalInfo(m);
-  return `<a class="member ${cls}" href="${m.profile_url}" target="_blank">
-    <div><b>${esc(m.name)}</b> <span class="muted">[${esc(m.id)}]</span></div>
-    <div>${esc(m.state)} ${m.destination ? '• ' + esc(m.destination) : ''}</div>
-    <small>${esc(m.status_text)}</small>
-    ${arrival}
+function memberRow(member){
+  const cls = important.has(member.state) ? 'hot' : '';
+  return `<a class="member ${cls}" href="${member.profile_url}" target="_blank" rel="noopener">
+    <div><b>${esc(member.name)}</b> <span class="muted">[${esc(member.id)}]</span></div>
+    <div>${esc(member.state)} ${member.destination ? '• ' + esc(member.destination) : ''}</div>
+    <small>${esc(member.status_text)}</small>
+    ${arrivalInfo(member)}
   </a>`;
 }
 
-function arrivalInfo(m){
-  if(!['Traveling','Returning'].includes(m.state)) return '';
-  const until = m.until || m.estimated_until;
-  if(!until){
-    return '<div class="arrival unavailable">Arrival time unavailable from Torn API</div>';
-  }
-  const label = m.state === 'Returning' ? 'Returns' : 'Lands';
-  const displayLabel = m.arrival_estimated
-    ? (m.state === 'Returning' ? 'Estimated return' : 'Estimated landing')
-    : label;
+function arrivalInfo(member){
+  if(!['Traveling','Returning'].includes(member.state)) return '';
+  const until = member.until || member.estimated_until;
+  if(!until) return '<div class="arrival unavailable">Arrival time unavailable from Torn API</div>';
+  const displayLabel = member.arrival_estimated
+    ? (member.state === 'Returning' ? 'Estimated return' : 'Estimated landing')
+    : (member.state === 'Returning' ? 'Returns' : 'Lands');
   const time = new Date(until * 1000);
   const arrivalTime = time.toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
   return `<div class="arrival">
@@ -117,10 +107,10 @@ function arrivalInfo(m){
 
 function updateCountdowns(){
   const now = Date.now();
-  document.querySelectorAll('.countdown').forEach(el => {
-    const remaining = Math.max(0, Number(el.dataset.until) * 1000 - now);
+  document.querySelectorAll('.countdown').forEach(element => {
+    const remaining = Math.max(0, Number(element.dataset.until) * 1000 - now);
     if(remaining <= 0){
-      el.textContent = '(arriving now)';
+      element.textContent = '(arriving now)';
       return;
     }
     const totalSeconds = Math.ceil(remaining / 1000);
@@ -128,14 +118,14 @@ function updateCountdowns(){
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
     const parts = hours ? [hours, minutes, seconds] : [minutes, seconds];
-    el.textContent = `(${parts.map(n => String(n).padStart(2, '0')).join(':')} remaining)`;
+    element.textContent = `(${parts.map(value => String(value).padStart(2, '0')).join(':')} remaining)`;
   });
 }
 
 function renderMembers(){
-  const q = document.getElementById('filter').value.toLowerCase();
-  const list = latest.members.filter(m => JSON.stringify(m).toLowerCase().includes(q));
-  document.getElementById('members').innerHTML = list.map(memberRow).join('');
+  const query = document.getElementById('filter').value.toLowerCase();
+  const members = latest.members.filter(member => JSON.stringify(member).toLowerCase().includes(query));
+  document.getElementById('members').innerHTML = members.map(memberRow).join('');
   updateCountdowns();
 }
 

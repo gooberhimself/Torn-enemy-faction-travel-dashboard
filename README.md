@@ -1,6 +1,6 @@
 # Torn Enemy Travel Dashboard
 
-A lightweight, mobile-friendly Flask dashboard for monitoring an opposing Torn faction during a war. It polls Torn's read-only faction API, organizes members by travel status and destination, estimates flight arrival times, tracks hospital release times, and records observed online activity.
+A lightweight, mobile-friendly Flask dashboard for monitoring opposing and friendly Torn factions during a war. It polls Torn's read-only faction API, organizes members by travel status and destination, estimates flight arrival times, tracks hospital release times, and records observed enemy online activity.
 
 ## Features
 
@@ -35,6 +35,16 @@ The separate `/hospital` page provides a focused view of hospitalized enemies.
 - Sorts members by their soonest known release.
 - Supports filtering by name, status, or location.
 - Links each member to their Torn profile.
+
+### Friendly travel and hospital dashboards
+
+The friendly pages mirror the enemy travel and hospital tools for your own faction:
+
+- `/friendly` groups friendly travelers by destination and shows estimated landing and return countdowns.
+- `/friendly/hospital` lists hospitalized friendlies with release times and live countdowns.
+- Friendly travel intentionally omits the enemy-focused safe-location calculation.
+- Friendly and enemy status, changes, and estimated flights are kept in separate in-memory state.
+- Friendly data comes from one additional faction-wide API request per polling cycle, never one request per player.
 
 ### Player activity timeline
 
@@ -74,7 +84,9 @@ The travel dashboard keeps the 50 most recent detected status changes, making it
 
 ## How it works
 
-The Flask application runs a background polling thread that requests the configured faction's basic member data from Torn. It classifies each member as traveling, abroad, returning, hospitalized, or another status, then exposes the processed state to the browser through `/api/status`. During that same successful poll, it records the member `last_action.status` values in SQLite for `/api/activity`; it does not make another Torn request.
+The Flask application runs a background polling thread that requests basic member data for the configured enemy and friendly factions. Each polling cycle makes two faction-wide requests: one for `ENEMY_FACTION_ID` and one for `FRIENDLY_FACTION_ID`. It classifies each member as traveling, abroad, returning, hospitalized, or another status, then exposes the separate processed snapshots through `/api/status` and `/api/friendly/status`.
+
+During the successful enemy poll, the application also records member `last_action.status` values in SQLite for `/api/activity`; activity recording does not make another Torn request. Friendly online activity is not stored.
 
 The browser refreshes dashboard data every 30 seconds. The server-side Torn API polling interval is controlled by `POLL_SECONDS` and is limited to a minimum of 30 seconds.
 
@@ -109,6 +121,13 @@ Open the activity timeline at:
 http://YOUR_SERVER_IP:8787/activity
 ```
 
+Open the friendly dashboards at:
+
+```text
+http://YOUR_SERVER_IP:8787/friendly
+http://YOUR_SERVER_IP:8787/friendly/hospital
+```
+
 ## Configuration
 
 Configure the application in `.env`:
@@ -117,6 +136,7 @@ Configure the application in `.env`:
 | --- | --- |
 | `TORN_API_KEY` | Your Torn API key. Keep this private. |
 | `ENEMY_FACTION_ID` | The faction ID to monitor. |
+| `FRIENDLY_FACTION_ID` | Your faction ID. Required for the friendly dashboards. |
 | `POLL_SECONDS` | Torn API polling interval. Defaults to `60` and cannot run below `30`. |
 | `HOST` | Listening address. Use `0.0.0.0` for access from another device on your LAN or VPN. |
 | `PORT` | Listening port. Defaults to `8787`. |
@@ -126,6 +146,7 @@ The included `.env.example` can be copied as a starting point. The real `.env` f
 ## Important notes
 
 - The dashboard uses Torn's read-only API and only displays information available through that API.
+- With the default 60-second interval, enemy and friendly tracking together use approximately two Torn API requests per minute.
 - Arrival countdowns are estimates because Torn does not expose enemy flight arrival timestamps.
 - Travel observations, arrival estimates, and recent status changes are held in memory and reset when the application restarts. Activity timeline history is stored persistently in `activity.db`.
 - SQLite support comes from Python's standard library. The activity feature adds no Python package dependencies and requires no one-time initialization command.

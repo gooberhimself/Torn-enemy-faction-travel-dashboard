@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Hospitalized Enemies</title>
+  <title>Friendly Hospital</title>
   <link rel="stylesheet" href="/static/style.css?v=20260818-activity">
 </head>
 <body>
   <header>
     <div class="header-row">
-      <h1>Hospitalized Enemies</h1>
-      <nav><a href="/">Travel</a><a href="/activity">Activity</a><a href="/friendly">Friendly Travel</a><a href="/friendly/hospital">Friendly Hospital</a></nav>
+      <h1>Friendly Hospital</h1>
+      <nav><a href="/">Enemy Travel</a><a href="/hospital">Enemy Hospital</a><a href="/activity">Activity</a><a href="/friendly">Friendly Travel</a></nav>
     </div>
     <div id="updated">Loading…</div>
     <div id="error"></div>
@@ -18,7 +18,7 @@
 
   <section class="card hospital-summary">
     <div class="num" id="hospitalized">0</div>
-    <div>Currently hospitalized</div>
+    <div>Friendlies currently hospitalized</div>
   </section>
 
   <section>
@@ -33,55 +33,55 @@ function esc(s){ return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','
 
 async function refresh(){
   try {
-    const res = await fetch('/api/status', {cache:'no-store'});
-    if(!res.ok) throw new Error(`Status request failed (${res.status})`);
-    latest = await res.json();
+    const response = await fetch('/api/friendly/status', {cache:'no-store'});
+    if(!response.ok) throw new Error(`Status request failed (${response.status})`);
+    latest = await response.json();
     render();
   } catch(error) {
     document.getElementById('error').textContent = error.message;
   }
 }
 
-function patientRow(m){
+function patientRow(member){
   let release = '<div class="release unavailable">Release time unavailable</div>';
-  if(m.until){
-    const time = new Date(m.until * 1000);
+  if(member.until){
+    const time = new Date(member.until * 1000);
     const releaseTime = time.toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
     release = `<div class="release">
       Released at <time datetime="${time.toISOString()}" title="${esc(time.toLocaleString())}">${esc(releaseTime)}</time>
-      <span class="countdown" data-until="${m.until}"></span>
+      <span class="countdown" data-until="${member.until}"></span>
     </div>`;
   }
-  return `<a class="member hot" href="${m.profile_url}" target="_blank" rel="noopener">
-    <div><b>${esc(m.name)}</b> <span class="muted">[${esc(m.id)}]</span></div>
-    <div>Hospital${m.destination ? ' • ' + esc(m.destination) : ''}</div>
-    <small>${esc(m.status_text)}</small>
+  return `<a class="member hot" href="${member.profile_url}" target="_blank" rel="noopener">
+    <div><b>${esc(member.name)}</b> <span class="muted">[${esc(member.id)}]</span></div>
+    <div>Hospital${member.destination ? ' • ' + esc(member.destination) : ''}</div>
+    <small>${esc(member.status_text)}</small>
     ${release}
   </a>`;
 }
 
 function render(){
   const patients = latest.members
-    .filter(m => m.state === 'Hospital')
+    .filter(member => member.state === 'Hospital')
     .sort((a, b) => (a.until || Infinity) - (b.until || Infinity));
-  const q = document.getElementById('filter').value.toLowerCase();
-  const visible = patients.filter(m => JSON.stringify(m).toLowerCase().includes(q));
+  const query = document.getElementById('filter').value.toLowerCase();
+  const visible = patients.filter(member => JSON.stringify(member).toLowerCase().includes(query));
 
   document.getElementById('updated').textContent = latest.updated_at ? `Updated ${latest.updated_at}` : 'Waiting for first poll…';
   document.getElementById('error').textContent = latest.error || '';
   document.getElementById('hospitalized').textContent = patients.length;
   document.getElementById('patients').innerHTML = visible.length
     ? visible.map(patientRow).join('')
-    : `<div class="empty">${patients.length ? 'No hospitalized enemies match that filter.' : 'No enemies are currently hospitalized.'}</div>`;
+    : `<div class="empty">${patients.length ? 'No hospitalized friendlies match that filter.' : 'No friendlies are currently hospitalized.'}</div>`;
   updateCountdowns();
 }
 
 function updateCountdowns(){
   const now = Date.now();
-  document.querySelectorAll('.countdown').forEach(el => {
-    const remaining = Math.max(0, Number(el.dataset.until) * 1000 - now);
+  document.querySelectorAll('.countdown').forEach(element => {
+    const remaining = Math.max(0, Number(element.dataset.until) * 1000 - now);
     if(remaining <= 0){
-      el.textContent = '(release due now)';
+      element.textContent = '(release due now)';
       return;
     }
     const totalSeconds = Math.ceil(remaining / 1000);
@@ -89,8 +89,8 @@ function updateCountdowns(){
     const hours = Math.floor((totalSeconds % 86400) / 3600);
     const minutes = Math.floor((totalSeconds % 3600) / 60);
     const seconds = totalSeconds % 60;
-    const clock = [hours, minutes, seconds].map(n => String(n).padStart(2, '0')).join(':');
-    el.textContent = `(${days ? `${days}d ` : ''}${clock} remaining)`;
+    const clock = [hours, minutes, seconds].map(value => String(value).padStart(2, '0')).join(':');
+    element.textContent = `(${days ? `${days}d ` : ''}${clock} remaining)`;
   });
 }
 

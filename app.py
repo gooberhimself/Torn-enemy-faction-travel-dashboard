@@ -14,6 +14,7 @@ load_dotenv()
 
 API_KEY = os.getenv("TORN_API_KEY", "").strip()
 FACTION_ID = os.getenv("ENEMY_FACTION_ID", "").strip()
+FRIENDLY_FACTION_ID = os.getenv("FRIENDLY_FACTION_ID", "").strip()
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8787"))
@@ -38,19 +39,26 @@ def detect_server_timezone():
 
 DEFAULT_ACTIVITY_TIMEZONE = detect_server_timezone()
 
-if not API_KEY or not FACTION_ID:
-    print("Missing TORN_API_KEY or ENEMY_FACTION_ID. Copy .env.example to .env and edit it.")
+if not API_KEY or not FACTION_ID or not FRIENDLY_FACTION_ID:
+    print("Missing TORN_API_KEY, ENEMY_FACTION_ID, or FRIENDLY_FACTION_ID. Copy .env.example to .env and edit it.")
 
 app = Flask(__name__)
 lock = Lock()
-state = {
-    "updated_at": None,
-    "error": None,
-    "members": [],
-    "changes": [],
-    "last_seen": {},
-    "travel_observed": {},
-}
+
+
+def new_runtime_state():
+    return {
+        "updated_at": None,
+        "error": None,
+        "members": [],
+        "changes": [],
+        "last_seen": {},
+        "travel_observed": {},
+    }
+
+
+state = new_runtime_state()
+friendly_state = new_runtime_state()
 
 COUNTRIES = [
     "Mexico", "Cayman Islands", "Canada", "Hawaii", "United Kingdom", "Argentina",
@@ -375,9 +383,9 @@ def activity_for_day(day, timezone_name=DEFAULT_ACTIVITY_TIMEZONE):
 init_activity_db()
 
 
-def api_get_faction_basic():
+def api_get_faction_basic(faction_id):
     # Torn v1 endpoint remains widely used for faction basic/member status data.
-    url = f"https://api.torn.com/faction/{FACTION_ID}"
+    url = f"https://api.torn.com/faction/{faction_id}"
     params = {"selections": "basic", "key": API_KEY}
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
@@ -450,18 +458,18 @@ def classify_member(member_id, member):
     }
 
 
-def poll_once():
-    data = api_get_faction_basic()
+def update_runtime_state(runtime_state, data, track_activity=False):
     members_raw = data.get("members") or {}
     members = [classify_member(mid, m) for mid, m in members_raw.items()]
     members.sort(key=lambda m: (m["state"] not in ["Traveling", "Abroad", "Returning"], m["destination"], m["name"].lower()))
 
     now = int(time.time())
-    record_activity_observations(members, now)
+    if track_activity:
+        record_activity_observations(members, now)
     new_changes = []
     with lock:
-        old = state["last_seen"]
-        observed = state["travel_observed"]
+        old = runtime_state["last_seen"]
+        observed = runtime_state["travel_observed"]
         active_flights = set()
         for m in members:
             if m["state"] in ["Traveling", "Returning"] and m["destination"] in TRAVEL_SECONDS:
@@ -495,19 +503,31 @@ def poll_once():
             if member_id not in active_flights:
                 del observed[member_id]
 
-        state["members"] = members
-        state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        state["error"] = None
-        state["changes"] = (new_changes + state["changes"])[:50]
+        runtime_state["members"] = members
+        runtime_state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        runtime_state["error"] = None
+        runtime_state["changes"] = (new_changes + runtime_state["changes"])[:50]
+
+
+def poll_once():
+    update_runtime_state(state, api_get_faction_basic(FACTION_ID), track_activity=True)
+
+
+def poll_friendly_once():
+    update_runtime_state(friendly_state, api_get_faction_basic(FRIENDLY_FACTION_ID))
 
 
 def poll_loop():
     while True:
-        try:
-            poll_once()
-        except Exception as e:
-            with lock:
-                state["error"] = str(e)
+        for poller, runtime_state in (
+            (poll_once, state),
+            (poll_friendly_once, friendly_state),
+        ):
+            try:
+                poller()
+            except Exception as e:
+                with lock:
+                    runtime_state["error"] = str(e)
         time.sleep(max(POLL_SECONDS, 30))
 
 
@@ -519,6 +539,16 @@ def index():
 @app.route("/hospital")
 def hospital():
     return render_template("hospital.html")
+
+
+@app.route("/friendly")
+def friendly():
+    return render_template("friendly.html")
+
+
+@app.route("/friendly/hospital")
+def friendly_hospital():
+    return render_template("friendly_hospital.html")
 
 
 @app.route("/activity")
@@ -545,10 +575,9 @@ def api_activity():
     return jsonify(activity_for_day(selected_date, viewer_timezone.key))
 
 
-@app.route("/api/status")
-def api_status():
+def status_payload(runtime_state, include_safety):
     with lock:
-        members = list(state["members"])
+        members = list(runtime_state["members"])
         grouped = {}
         unsafe_locations = set()
         unsafe_by_location = {}
@@ -567,22 +596,35 @@ def api_status():
             # Safe locations should be removed when enemies are currently abroad,
             # actively traveling there, or hospitalized there. Returning players are
             # coming home, so their previous destination is not counted as unsafe.
-            if m["state"] in UNSAFE_DESTINATION_STATES and m["destination"] in COUNTRIES:
+            if include_safety and m["state"] in UNSAFE_DESTINATION_STATES and m["destination"] in COUNTRIES:
                 unsafe_locations.add(m["destination"])
                 unsafe_by_location.setdefault(m["destination"], []).append(m)
 
-        safe_locations = [country for country in COUNTRIES if country not in unsafe_locations]
+        safe_locations = (
+            [country for country in COUNTRIES if country not in unsafe_locations]
+            if include_safety else []
+        )
 
-        return jsonify({
-            "updated_at": state["updated_at"],
-            "error": state["error"],
+        return {
+            "updated_at": runtime_state["updated_at"],
+            "error": runtime_state["error"],
             "members": members,
             "grouped": grouped,
             "safe_locations": safe_locations,
             "unsafe_locations": sorted(unsafe_locations),
             "unsafe_by_location": unsafe_by_location,
-            "changes": state["changes"],
-        })
+            "changes": runtime_state["changes"],
+        }
+
+
+@app.route("/api/status")
+def api_status():
+    return jsonify(status_payload(state, include_safety=True))
+
+
+@app.route("/api/friendly/status")
+def api_friendly_status():
+    return jsonify(status_payload(friendly_state, include_safety=False))
 
 
 if __name__ == "__main__":
