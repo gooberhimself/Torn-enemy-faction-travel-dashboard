@@ -23,7 +23,64 @@ Torn does not provide enemy flight arrival timestamps through the faction endpoi
 - Recognizes both outbound descriptions and return descriptions such as `Traveling from UAE to Torn`.
 - Keeps the estimated arrival stable across later API polls.
 
-Flights already underway when the application starts or restarts receive a full-duration estimate. Flights detected after startup should be accurate to roughly the configured polling interval.
+Enemy flights retain their first observed departure and fixed estimate across restarts. A flight first encountered already underway receives a full-duration estimate and cannot contribute to learning. Friendly estimates remain in memory. Estimates are approximate because departure is first observed after it happens, and actual flight times vary.
+
+### Learned enemy travel methods
+
+The same successful enemy polls now record travel observations in `activity.db`; no
+extra Torn requests are made. The enemy rows display the inferred normal method,
+confidence, number of reliable observed legs, occasional Business Class use, and
+possible behavior changes. Hover over the profile line for lifetime match counts.
+The displayed normal method is an inference, not proof of the current flight's method.
+
+- A departure must be bounded by a recent known home status (or the correct abroad
+  location for a return). Arrival must be explicitly observed at the destination,
+  including a foreign hospital, or back home for a return.
+- A gap greater than 1.5 times the configured polling interval (minimum interval
+  30 seconds) invalidates that leg for learning, including across a restart.
+  Unobserved departures, missed arrivals, and unmatched or ambiguous durations are
+  also excluded. Their observations and rejection reasons are retained.
+- Matching compares all four published route durations. It uses the actual
+  departure/arrival polling gaps, 3% flight variation, and 30 seconds of table
+  rounding. Exactly one method must be plausible. The nearest method and absolute
+  error are stored even when an arrived leg is rejected.
+- Normal methods require at least three reliable matches and 75% of the latest
+  five non-Business legs. Three consecutive matches can establish a new method.
+  High confidence requires at least six legs and 87.5% agreement in the latest
+  eight non-Business legs. Two consecutive conflicting legs against an established
+  older pattern suspend the prediction; a third can establish the new method.
+- Business matches are remembered separately. Occasional tickets do not replace
+  the normal method; at least five of the latest six reliable legs must be Business
+  to predict Business normally. High Business confidence uses the latest eight
+  reliable legs. A detected behavior change limits confidence to Likely.
+- Inference uses the latest 20 reliable legs within 90 days. Lifetime observations
+  remain stored. Rejected legs never vote or count toward confidence.
+- New enemy flight estimates use an established method; otherwise the original
+  `TRAVEL_SECONDS` fallback remains unchanged. Explicit API arrival timestamps
+  always take precedence. Estimates are fixed at first observation of each leg.
+
+Published learning durations are in `travel_learning.py`, sourced from the
+[Torn travel wiki](https://wiki.torn.com/wiki/Travel), checked September 25, 2026
+(after the June 2026 travel-time update). The older fallback durations are deliberately
+preserved for compatibility. Books, special delays, and hidden modifiers are not
+modeled: unmatched timings are rejected, but a modifier that mimics another method
+cannot be distinguished from duration alone. Property ownership is never used.
+
+`travel_tracking` stores each faction/player's latest checkpoint and active flight.
+`travel_observations` stores each leg's player ID, faction, destination, direction,
+first observed departure/arrival, duration, nearest method, error, expected duration,
+tolerance, eligibility/rejection reason, and API status/travel/plane metadata.
+Unique departure/direction keys and atomic checkpoints prevent duplicate observations
+from repeated polls. Profiles follow the player ID across enemy factions; active
+flight checkpoints remain faction-scoped. No existing activity tables are changed.
+Schema creation is automatic and additive at startup. Learning runs whenever the
+configured enemy faction is monitored, before or during a war.
+
+Run the offline simulations (temporary databases, no Torn requests) with:
+
+```bash
+venv/bin/python -m unittest discover -s tests -v
+```
 
 ### Hospital dashboard
 
@@ -43,7 +100,7 @@ The friendly pages mirror the enemy travel and hospital tools for your own facti
 - `/friendly` groups friendly travelers by destination and shows estimated landing and return countdowns.
 - `/friendly/hospital` lists hospitalized friendlies with release times and live countdowns.
 - Friendly travel intentionally omits the enemy-focused safe-location calculation.
-- Friendly and enemy status, changes, and estimated flights are kept in separate in-memory state.
+- Friendly and enemy status and changes are kept in separate in-memory state; enemy flight checkpoints additionally persist in SQLite.
 - Friendly data comes from one additional faction-wide API request per polling cycle, never one request per player.
 
 ### Player activity timeline
@@ -148,7 +205,7 @@ The included `.env.example` can be copied as a starting point. The real `.env` f
 - The dashboard uses Torn's read-only API and only displays information available through that API.
 - With the default 60-second interval, enemy and friendly tracking together use approximately two Torn API requests per minute.
 - Arrival countdowns are estimates because Torn does not expose enemy flight arrival timestamps.
-- Travel observations, arrival estimates, and recent status changes are held in memory and reset when the application restarts. Activity timeline history is stored persistently in `activity.db`.
+- Enemy travel observations, flight checkpoints, and activity history persist in `activity.db`. Friendly arrival estimates and recent status changes remain in memory.
 - SQLite support comes from Python's standard library. The activity feature adds no Python package dependencies and requires no one-time initialization command.
 - The application does not include authentication. Do not expose it directly to the public internet without adding access controls.
 - Never commit or share your Torn API key.

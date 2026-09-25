@@ -94,7 +94,19 @@ function memberRow(m){
     <div>${esc(m.state)} ${m.destination ? '• ' + esc(m.destination) : ''}</div>
     <small>${esc(m.status_text)}</small>
     ${arrival}
+    ${travelProfile(m)}
   </a>`;
+}
+
+function travelProfile(m){
+  const p = m.travel_profile;
+  if(!p) return '';
+  const notes = [];
+  if(p.has_used_business && p.method !== 'Business Class') notes.push('Has used Business Class');
+  if(p.behavior_changed) notes.push('Travel behavior appears to have changed');
+  const counts = Object.entries(p.matches).map(([method, n]) => `${method}: ${n}`).join(' • ');
+  const basis = m.arrival_estimated ? ` • ETA: ${m.prediction_method || 'existing default'}` : '';
+  return `<small title="${esc(counts)}">Method: ${esc(p.method || 'Unknown')} • Confidence: ${esc(p.confidence)} • Observed trips: ${p.observed_trips}${esc(basis)}${notes.length ? '<br>' + esc(notes.join(' • ')) : ''}</small>`;
 }
 
 function arrivalInfo(m){

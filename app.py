@@ -10,6 +10,8 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
+import travel_learning
+
 load_dotenv()
 
 API_KEY = os.getenv("TORN_API_KEY", "").strip()
@@ -212,6 +214,7 @@ def init_activity_db():
             migrate_activity_schema(connection)
         else:
             create_activity_schema(connection)
+        travel_learning.create_schema(connection)
         # A previous process cannot vouch for the time while it was stopped.
         connection.execute("UPDATE activity_intervals SET is_open = 0 WHERE is_open = 1")
 
@@ -448,6 +451,9 @@ def classify_member(member_id, member):
         "name": member.get("name", f"Player {member_id}"),
         "level": member.get("level", ""),
         "status_text": combined or "Unknown",
+        "api_state": state_name,
+        "travel_api_info": {k: v for k, v in member.items()
+                            if k == "status" or "travel" in k.lower() or "plane" in k.lower()},
         "state": travel_state,
         "destination": destination,
         "until": until,
@@ -466,13 +472,17 @@ def update_runtime_state(runtime_state, data, track_activity=False):
     now = int(time.time())
     if track_activity:
         record_activity_observations(members, now)
+        with activity_db() as connection:
+            travel_learning.observe_members(
+                connection, FACTION_ID, members, now, POLL_SECONDS, TRAVEL_SECONDS
+            )
     new_changes = []
     with lock:
         old = runtime_state["last_seen"]
         observed = runtime_state["travel_observed"]
         active_flights = set()
         for m in members:
-            if m["state"] in ["Traveling", "Returning"] and m["destination"] in TRAVEL_SECONDS:
+            if not track_activity and m["state"] in ["Traveling", "Returning"] and m["destination"] in TRAVEL_SECONDS:
                 active_flights.add(m["id"])
                 flight_key = f"{m['state']}|{m['destination']}"
                 flight = observed.get(m["id"])
@@ -575,6 +585,20 @@ def api_activity():
     return jsonify(activity_for_day(selected_date, viewer_timezone.key))
 
 
+def is_known_in_torn(member):
+    """Require a recognized home description, not just a non-abroad state."""
+    if member["destination"] or member["state"] in {"Traveling", "Returning", "Abroad"}:
+        return False
+    status = member.get("travel_api_info", {}).get("status") or {}
+    description = str(status.get("description") or "").strip()
+    api_state = member.get("api_state")
+    if api_state == "Okay":
+        return description.casefold() == "okay"
+    home_descriptions = {"Hospital": r"in hospital(?: for\b.*)?", "Jail": r"in jail(?: for\b.*)?"}
+    pattern = home_descriptions.get(api_state)
+    return bool(pattern and re.fullmatch(pattern, description, flags=re.IGNORECASE))
+
+
 def status_payload(runtime_state, include_safety):
     with lock:
         members = list(runtime_state["members"])
@@ -592,6 +616,8 @@ def status_payload(runtime_state, include_safety):
             elif m["state"] in ["Traveling", "Abroad", "Returning"]:
                 bucket = m["destination"] or m["state"]
                 grouped.setdefault(bucket, []).append(m)
+            elif include_safety and is_known_in_torn(m):
+                grouped.setdefault("Torn City", []).append(m)
 
             # Safe locations should be removed when enemies are currently abroad,
             # actively traveling there, or hospitalized there. Returning players are
