@@ -6,7 +6,8 @@
   let state = null, access = {}, busy = false, editingId = null, formVersion = null, dragging = null;
   let serverTime = Date.now()/1000, syncedAt = performance.now(), connected = false, lastTouch = 0;
   const now = () => serverTime + (performance.now()-syncedAt)/1000;
-  const canEdit = () => Boolean(access.editing && access.expires_at > now());
+  const signedIn = () => ['public','tactician'].includes(access.role) && access.expires_at > now();
+  const canEdit = () => signedIn() && (access.role==='tactician' || !state?.locked);
   const profile = (id, name) => `<a href="https://www.torn.com/profiles.php?XID=${encodeURIComponent(id)}" target="_blank" rel="noopener noreferrer">${esc(name)}</a>`;
   const date = timestamp => timestamp ? new Date(timestamp*1000).toLocaleString() : 'Unavailable';
   const error = message => { $('error').textContent = message; $('error').hidden = !message; };
@@ -20,10 +21,11 @@
   }
   function receive(data, force=false) {
     if (data.access) access = data.access;
-    if (busy && !force) return;
     if (state && data.revision < state.revision) return;
+    const refreshAccess = state && data.auth_revision !== state.auth_revision && !data.access;
     serverTime = data.server_time; syncedAt = performance.now(); state = data;
     render();
+    if(refreshAccess)refresh().catch(e=>error(e.message));
   }
   async function refresh() {
     const r = await fetch(base+'/state', {cache:'no-store'});
@@ -59,9 +61,15 @@
   function render() {
     if (!state) return;
     const edit = canEdit();
-    $('mode').textContent = edit ? 'Coordinator Mode' : 'Read-only';
+    $('mode').textContent = !signedIn() ? 'Read-only' : access.role==='tactician' ? 'Tactician' : edit ? 'Public · editing' : 'Public · read-only';
     $('mode').classList.toggle('unlocked', edit);
-    $('access').textContent = edit ? 'Lock Editing' : 'Unlock Editing';
+    $('access').textContent = signedIn() ? 'Sign out' : 'Sign in';
+    $('board-status').textContent = state.locked ? 'Board locked · tacticians can edit' : 'Board unlocked';
+    $('board-lock').hidden = !signedIn() || access.role!=='tactician';
+    $('board-lock').textContent = state.locked ? 'Unlock board' : 'Lock board';
+    $('board-lock').disabled = busy;
+    $('save-assignment').disabled = busy || !edit;
+    document.querySelectorAll('#assignment-form input, #assignment-form select').forEach(el=>{el.disabled=!edit;});
     $('access').disabled = busy;
     $('add').hidden = !edit; $('add').disabled = busy;
     const next = state.active[0];
@@ -94,7 +102,7 @@
   }
   function tick() {
     if (!state) return;
-    if (access.editing && !canEdit()) { access.editing=false; render(); return; }
+    if (access.role && !signedIn()) { access.role=null; render(); return; }
     const c = state.observations.chain, stale = T.stale(c,now(),state.stale_seconds);
     $('chain-count').textContent = c?.current ?? '—';
     const seconds = T.remaining(c?.deadline,now());
@@ -164,8 +172,11 @@
   });
   $('add').onclick=()=>assignment();
   $('access').onclick=async()=>{
-    if(canEdit()) await change('lock');
-    else { $('pin-form').reset(); $('pin-error').textContent=access.configured?'':'Coordinator PIN is not configured on the server.'; $('pin-dialog').showModal(); $('pin').focus(); }
+    if(signedIn()) await change('lock');
+    else { $('pin-form').reset(); $('pin-error').textContent=access.configured?'':'Public and tactician PINs are not configured on the server.'; $('pin-dialog').showModal(); $('pin').focus(); }
+  };
+  $('board-lock').onclick=async()=>{
+    if(signedIn() && access.role==='tactician')await change('board-lock',{locked:!state.locked});
   };
   $('pin-form').onsubmit=async e=>{e.preventDefault(); const ok=await change('unlock',{pin:$('pin').value}); $('pin').value=''; if(ok)$('pin-dialog').close(); else $('pin-error').textContent=$('error').textContent;};
   $('assignment-form').onsubmit=async e=>{
@@ -176,7 +187,7 @@
   $('attacker-search').oninput=()=>options('friendly','attacker','attacker-search');
   $('target-search').oninput=()=>{options('enemies','target','target-search');preview();}; $('target').onchange=preview;
   async function touch() {
-    if(!canEdit() || busy || now()-lastTouch<60)return;
+    if(!signedIn() || busy || now()-lastTouch<60)return;
     lastTouch=now();
     try {
       const r=await fetch(base+'/touch',{method:'POST',headers:{'X-CSRF-Token':access.csrf}});
@@ -190,7 +201,7 @@
     const events=new EventSource(base+'/events');
     events.addEventListener('state',e=>{connected=true;$('connection').textContent='Live';receive(JSON.parse(e.data));});
     events.addEventListener('coordinator_error',e=>{connected=false;error(JSON.parse(e.data).error);$('connection').textContent='Coordinator unavailable';});
-    events.onopen=()=>{connected=true;$('connection').textContent='Live';};
+    events.onopen=()=>{connected=true;$('connection').textContent='Live';refresh().catch(e=>error(e.message));};
     events.onerror=()=>{connected=false;$('connection').textContent='Disconnected · reconnecting';};
     setInterval(tick,1000);
     setInterval(()=>{if(!busy)availability();},15000);

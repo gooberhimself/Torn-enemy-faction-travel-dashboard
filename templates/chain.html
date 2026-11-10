@@ -6,7 +6,7 @@
   <link rel="stylesheet" href="{{ url_prefix }}/static/style.css">
   <link rel="stylesheet" href="{{ url_prefix }}/static/chain.css">
   <script defer src="{{ url_prefix }}/static/chain-time.js"></script>
-  <script defer src="{{ url_prefix }}/static/chain.js?v=20261110-storage-errors"></script>
+  <script defer src="{{ url_prefix }}/static/chain.js?v=20261110-role-access"></script>
 </head>
 <body class="chain-page" data-api="{{ url_prefix }}/api/chain">
   <header>
@@ -14,7 +14,7 @@
       <a href="{{ url_prefix }}/">Enemy Travel</a><a href="{{ url_prefix }}/hospital">Hospital</a>
       <a href="{{ url_prefix }}/activity">Activity</a><a href="{{ url_prefix }}/friendly">Friendly Travel</a>
     </nav></div>
-    <div class="toolbar"><span id="mode" class="badge">Read-only</span><button id="access">Unlock Editing</button><span id="connection" class="muted" role="status">Connecting…</span></div>
+    <div class="toolbar"><span id="mode" class="badge">Read-only</span><button id="access">Sign in</button><span id="board-status" class="badge">Loading board…</span><button id="board-lock" hidden>Lock board</button><span id="connection" class="muted" role="status">Connecting…</span></div>
   </header>
   <main>
     <p id="error" role="alert" hidden></p>
@@ -36,9 +36,9 @@
     </section>
   </main>
   <dialog id="pin-dialog" aria-labelledby="pin-title"><form id="pin-form">
-    <h2 id="pin-title">Coordinator Access</h2><label for="pin">Enter your 5-digit PIN</label>
+    <h2 id="pin-title">Board Access</h2><label for="pin">Enter your public or tactician 5-digit PIN</label>
     <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" required autocomplete="off">
-    <p id="pin-error" role="alert"></p><div class="actions"><button type="button" data-close="pin-dialog">Cancel</button><button class="primary">Unlock</button></div>
+    <p id="pin-error" role="alert"></p><div class="actions"><button type="button" data-close="pin-dialog">Cancel</button><button class="primary">Sign in</button></div>
   </form></dialog>
   <dialog id="assignment-dialog" aria-labelledby="assignment-title"><form id="assignment-form">
     <h2 id="assignment-title">Add Assignment</h2>
@@ -48,7 +48,7 @@
     <select id="target" size="5" required aria-label="Enemy faction member"></select>
     <div id="target-preview" class="muted"></div>
     <label class="check"><input type="checkbox" id="reuse"> Allow this target in multiple active queue positions</label>
-    <p id="assignment-error" role="alert"></p><div class="actions"><button type="button" data-close="assignment-dialog">Cancel</button><button class="primary">Save Assignment</button></div>
+    <p id="assignment-error" role="alert"></p><div class="actions"><button type="button" data-close="assignment-dialog">Cancel</button><button id="save-assignment" class="primary">Save Assignment</button></div>
   </form></dialog>
 </body>
 </html>

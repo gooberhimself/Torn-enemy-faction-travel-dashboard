@@ -10,7 +10,8 @@ import travel_learning as learning
 
 # Import Flask without touching the user's live database or starting polling.
 _connect = sqlite3.connect
-with patch('sqlite3.connect', side_effect=lambda *args, **kwargs: _connect(':memory:')):
+with patch('sqlite3.connect', side_effect=lambda *args, **kwargs: _connect(':memory:')), \
+     patch('chain_auth.SessionAccess.synchronize_pins'):
     app = importlib.import_module('app')
 
 

@@ -1,20 +1,14 @@
 """Persistent sequential chain queue; no network access or polling in HTTP routes."""
-import hashlib
-import hmac
 import json
 import os
-import re
-import secrets
 import sqlite3
 import time
 from contextlib import closing, contextmanager
 from threading import Condition
 
 from flask import Blueprint, Response, jsonify, render_template, request
-from werkzeug.security import check_password_hash
+from chain_auth import SessionAccess, digest, LOCKOUT_SECONDS
 
-SESSION_SECONDS = 30 * 60
-LOCKOUT_SECONDS = 15 * 60
 WARNINGS = {"prepare": 120, "attack": 60, "urgent": 30, "critical": 15}
 SUCCESS_RESULTS = {"Attacked", "Mugged", "Hospitalized"}
 
@@ -43,11 +37,7 @@ class Coordinator:
 
     def initialize(self):
         with self.db(write=True) as db:
-            for sql in SCHEMA:
-                db.execute(sql)
-            friendly, enemy = self.factions()
-            db.execute("INSERT OR IGNORE INTO chain_queue VALUES (1, ?, ?, 0, 0, ?)",
-                       (friendly, enemy, time.time()))
+            create_schema(db, *self.factions())
 
     def queue(self, db):
         row = db.execute("SELECT * FROM chain_queue WHERE id=1").fetchone()
@@ -128,11 +118,17 @@ class Coordinator:
             raise QueueError('allow_duplicate must be a boolean.')
         return (*found, int(override))
 
-    def mutate(self, action, data, assignment_id=None):
+    def mutate(self, action, data, assignment_id=None, authorize=None):
+        # HTTP callers must pass their session check; trusted internal callers
+        # (including offline tests) can use this storage primitive directly.
         with self.db(write=True) as db:
             queue = self.queue(db)
+            if authorize is not None:
+                authorize(db)
             if type(data.get('version')) is not int or data['version'] != queue['version']:
                 raise QueueError('Queue changed. Review the refreshed order and try again.', 409)
+            if action == 'restore' and type(assignment_id) is not int:
+                raise QueueError('assignment_id is required.')
             previous = self.head(db)
             now = time.time()
             row = None
@@ -186,6 +182,20 @@ class Coordinator:
             self.promote(db, previous)
             self.event(db, action, assignment_id, data)
             self.bump(db)
+        self.notify()
+
+    def set_board_lock(self, data, authorize):
+        with self.db(write=True) as db:
+            queue = self.queue(db)
+            authorize(db)
+            if type(data.get('locked')) is not bool:
+                raise QueueError('locked must be a boolean.')
+            if type(data.get('version')) is not int or data['version'] != queue['version']:
+                raise QueueError('Queue changed. Review the refreshed board and try again.', 409)
+            if bool(queue['locked']) != data['locked']:
+                db.execute('UPDATE chain_queue SET locked=? WHERE id=1', (int(data['locked']),))
+                self.event(db, 'board_locked' if data['locked'] else 'board_unlocked')
+                self.bump(db)
         self.notify()
 
     def reconcile(self, attacks):
@@ -242,45 +252,28 @@ class Coordinator:
             self.notify()
 
 
-def digest(value):
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
 def register(app, coordinator):
     bp = Blueprint('chain', __name__)
-    app.config.setdefault('CHAIN_PIN_HASH', os.getenv('CHAIN_PIN_HASH', ''))
+    for role in ('PUBLIC', 'TACTICIAN'):
+        app.config.setdefault(role + '_PIN_HASH', os.getenv(role + '_PIN_HASH', ''))
     app.config.setdefault('CHAIN_COOKIE_SECURE', os.getenv('CHAIN_COOKIE_SECURE', 'true').lower() != 'false')
     cookie_name = 'chain_' + digest('|'.join(coordinator.factions()))[:12]
+    access = SessionAccess(coordinator, app.config, QueueError)
+    try:
+        access.synchronize_pins()
+    except QueueError as exc:
+        # Preserve the old matchup's sessions/configuration if the operator has
+        # selected the wrong database. Ordinary tracking can continue as before.
+        app.logger.error('Coordinator authorization unavailable: %s', exc.message)
 
-    def identity(create=False, touch=False):
-        raw = request.cookies.get(cookie_name, '')
-        now = time.time()
-        with coordinator.db(write=True) as db:
-            row = db.execute('SELECT * FROM chain_sessions WHERE token=?', (digest(raw),)).fetchone() if raw else None
-            if row and row['expires_at'] <= now:
-                db.execute('DELETE FROM chain_sessions WHERE token=?', (digest(raw),))
-                row = None
-            if not row and create:
-                raw = secrets.token_urlsafe(32)
-                db.execute('DELETE FROM chain_sessions WHERE expires_at<=?', (now,))
-                db.execute('INSERT INTO chain_sessions VALUES(?,?,0,?)', (digest(raw), secrets.token_urlsafe(32), now+SESSION_SECONDS))
-                row = db.execute('SELECT * FROM chain_sessions WHERE token=?', (digest(raw),)).fetchone()
-            if row and touch:
-                db.execute('UPDATE chain_sessions SET expires_at=? WHERE token=?', (now+SESSION_SECONDS, digest(raw)))
-        return (dict(row) if row else None), raw
+    def raw_token():
+        return request.cookies.get(cookie_name, '')
 
-    def csrf(row):
-        token = request.headers.get('X-CSRF-Token', '')
-        if not row or not hmac.compare_digest(row['csrf'], token):
-            raise QueueError('Invalid or expired CSRF token. Refresh the page.', 403)
+    def csrf_token():
+        return request.headers.get('X-CSRF-Token', '')
 
-    def authorized():
-        row, raw = identity()
-        if not row or not row['editing']:
-            raise QueueError('Unlock Coordinator Mode to edit.', 401)
-        csrf(row)
-        identity(touch=True)
-        return raw
+    def authorized(db, permission='edit'):
+        return access.authorize(db, raw_token(), csrf_token(), permission)
 
     def body():
         data = request.get_json(silent=True)
@@ -324,76 +317,58 @@ def register(app, coordinator):
     @bp.get('/api/chain/state')
     def state():
         result = coordinator.snapshot()
-        row, raw = identity(create=True)
-        result['access'] = {'editing': bool(row['editing']), 'csrf': row['csrf'], 'expires_at': row['expires_at'],
-                            'configured': bool(app.config['CHAIN_PIN_HASH'])}
+        row, raw = access.viewer(raw_token())
+        role = row['role']
+        result['access'] = {'role': role,
+                            'editing': role == 'tactician' or (role == 'public' and not result['locked']),
+                            'csrf': row['csrf'], 'expires_at': row['expires_at'],
+                            'configured': any(access.verifier(r) for r in ('public', 'tactician'))}
         response = jsonify(result)
         response.set_cookie(cookie_name, raw, secure=app.config['CHAIN_COOKIE_SECURE'], httponly=True, samesite='Strict', path='/')
         return response
 
     @bp.post('/api/chain/unlock')
     def unlock():
-        row, raw = identity()
-        csrf(row)
-        pin = body().get('pin')
-        verifier = app.config['CHAIN_PIN_HASH']
-        if not verifier:
-            raise QueueError('Coordinator PIN has not been configured.', 503)
-        now = time.time()
-        ip = digest(request.remote_addr or 'unknown')  # Never trust forwarded headers from arbitrary clients.
-        with coordinator.db(write=True) as db:
-            db.execute('DELETE FROM chain_login_attempts WHERE created_at<=?', (now-LOCKOUT_SECONDS,))
-            total = db.execute('SELECT COUNT(*) FROM chain_login_attempts').fetchone()[0]
-            own = db.execute('SELECT COUNT(*) FROM chain_login_attempts WHERE ip=?', (ip,)).fetchone()[0]
-            if total >= 25 or own >= 5:
-                raise QueueError('Too many PIN attempts. Try again in 15 minutes.', 429)
-            attempt = db.execute('INSERT INTO chain_login_attempts(ip,created_at) VALUES(?,?)', (ip, now)).lastrowid
-        try:
-            correct = isinstance(pin, str) and re.fullmatch(r'[0-9]{5}', pin) and check_password_hash(verifier, pin)
-        except (ValueError, TypeError):
-            correct = False
-        if not correct:
-            raise QueueError('Invalid PIN.', 401)
-        with coordinator.db(write=True) as db:
-            db.execute('DELETE FROM chain_login_attempts WHERE id=?', (attempt,))
-            db.execute('DELETE FROM chain_sessions WHERE token=?', (digest(raw),))
-            new_raw, new_csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-            db.execute('INSERT INTO chain_sessions VALUES(?,?,1,?)', (digest(new_raw), new_csrf, now+SESSION_SECONDS))
+        new_raw = access.login(raw_token(), csrf_token(), body().get('pin'), request.remote_addr)
         response = jsonify(ok=True)
         response.set_cookie(cookie_name, new_raw, secure=app.config['CHAIN_COOKIE_SECURE'], httponly=True, samesite='Strict', path='/')
         return response
 
     @bp.post('/api/chain/lock')
     def lock():
-        raw = authorized()
+        # Compatibility: this endpoint signs out this browser, not the board.
         with coordinator.db(write=True) as db:
-            db.execute('DELETE FROM chain_sessions WHERE token=?', (digest(raw),))
+            row = authorized(db, 'session')
+            db.execute('DELETE FROM chain_sessions WHERE token=?', (row['token'],))
         response = jsonify(ok=True)
         response.delete_cookie(cookie_name, path='/')
         return response
 
     @bp.post('/api/chain/touch')
     def touch():
-        authorized()
+        with coordinator.db(write=True) as db:
+            authorized(db, 'session')
         return jsonify(ok=True)
+
+    @bp.post('/api/chain/board-lock')
+    def board_lock():
+        coordinator.set_board_lock(body(), lambda db: authorized(db, 'tactician'))
+        return jsonify(coordinator.snapshot())
 
     @bp.route('/api/chain/assignments', methods=['POST'])
     @bp.route('/api/chain/assignments/<int:assignment_id>', methods=['PATCH', 'DELETE'])
     def assignment(assignment_id=None):
-        authorized()
-        coordinator.mutate({'POST': 'add', 'PATCH': 'edit', 'DELETE': 'delete'}[request.method], body(), assignment_id)
+        coordinator.mutate({'POST': 'add', 'PATCH': 'edit', 'DELETE': 'delete'}[request.method],
+                           body(), assignment_id, authorize=authorized)
         return jsonify(coordinator.snapshot())
 
     @bp.post('/api/chain/<action>')
     def operation(action):
-        authorized()
         if action not in ('reorder', 'advance', 'skip', 'restore'):
             raise QueueError('Unknown operation.', 404)
         data = body()
         aid = data.get('assignment_id') if action == 'restore' else None
-        if action == 'restore' and type(aid) is not int:
-            raise QueueError('assignment_id is required.')
-        coordinator.mutate(action, data, aid)
+        coordinator.mutate(action, data, aid, authorize=authorized)
         return jsonify(coordinator.snapshot())
 
     @bp.get('/api/chain/events')
@@ -427,7 +402,7 @@ def register(app, coordinator):
 
 SCHEMA = [
     '''CREATE TABLE IF NOT EXISTS chain_queue(id INTEGER PRIMARY KEY CHECK(id=1),faction_id TEXT NOT NULL,
-       enemy_faction_id TEXT NOT NULL,version INTEGER NOT NULL,revision INTEGER NOT NULL,updated_at REAL NOT NULL)''',
+       enemy_faction_id TEXT NOT NULL,version INTEGER NOT NULL,revision INTEGER NOT NULL,updated_at REAL NOT NULL,locked INTEGER NOT NULL DEFAULT 0 CHECK(locked IN (0,1)),auth_revision INTEGER NOT NULL DEFAULT 0)''',
     '''CREATE TABLE IF NOT EXISTS chain_assignments(id INTEGER PRIMARY KEY,queue_id INTEGER NOT NULL DEFAULT 1 REFERENCES chain_queue(id),
        attacker_id TEXT NOT NULL,attacker_name TEXT NOT NULL,target_id TEXT NOT NULL,target_name TEXT NOT NULL,
        position INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','deferred','deleted','completed_unverified','completed_verified')),
@@ -447,6 +422,37 @@ SCHEMA = [
     '''CREATE INDEX IF NOT EXISTS chain_event_time ON chain_events(created_at)''',
     '''CREATE TABLE IF NOT EXISTS chain_attacks(attack_id TEXT PRIMARY KEY,payload TEXT NOT NULL,observed_at REAL NOT NULL)''',
     '''CREATE TABLE IF NOT EXISTS chain_observations(kind TEXT PRIMARY KEY,payload TEXT NOT NULL,error TEXT)''',
-    '''CREATE TABLE IF NOT EXISTS chain_sessions(token TEXT PRIMARY KEY,csrf TEXT NOT NULL,editing INTEGER NOT NULL,expires_at REAL NOT NULL)''',
+    '''CREATE TABLE IF NOT EXISTS chain_sessions(token TEXT PRIMARY KEY,csrf TEXT NOT NULL,editing INTEGER NOT NULL,expires_at REAL NOT NULL,role TEXT CHECK(role IN ('public','tactician')),credential_generation INTEGER NOT NULL DEFAULT 0)''',
+    '''CREATE TABLE IF NOT EXISTS chain_pin_roles(role TEXT PRIMARY KEY CHECK(role IN ('public','tactician')),fingerprint TEXT NOT NULL,generation INTEGER NOT NULL)''',
     '''CREATE TABLE IF NOT EXISTS chain_login_attempts(id INTEGER PRIMARY KEY,ip TEXT NOT NULL,created_at REAL NOT NULL)''',
 ]
+
+
+def create_schema(db, friendly, enemy):
+    """Add role/lock columns atomically; retain all queue and attack history."""
+    if not db.in_transaction:
+        db.execute('BEGIN IMMEDIATE')
+    for sql in SCHEMA:
+        db.execute(sql)
+    queue_columns = {r['name'] for r in db.execute('PRAGMA table_info(chain_queue)')}
+    for column, declaration in (
+        ('locked', 'INTEGER NOT NULL DEFAULT 0 CHECK(locked IN (0,1))'),
+        ('auth_revision', 'INTEGER NOT NULL DEFAULT 0'),
+    ):
+        if column not in queue_columns:
+            db.execute(f'ALTER TABLE chain_queue ADD COLUMN {column} {declaration}')
+    session_columns = {r['name'] for r in db.execute('PRAGMA table_info(chain_sessions)')}
+    migrated = False
+    for column, declaration in (
+        ('role', "TEXT CHECK(role IN ('public','tactician'))"),
+        ('credential_generation', 'INTEGER NOT NULL DEFAULT 0'),
+    ):
+        if column not in session_columns:
+            db.execute(f'ALTER TABLE chain_sessions ADD COLUMN {column} {declaration}')
+            migrated = True
+    if migrated:
+        # A legacy editing flag cannot safely be assigned either new role.
+        db.execute('DELETE FROM chain_sessions')
+    db.execute("""INSERT OR IGNORE INTO chain_queue
+        (id,faction_id,enemy_faction_id,version,revision,updated_at) VALUES(1,?,?,0,0,?)""",
+               (friendly, enemy, time.time()))

@@ -28,7 +28,7 @@ class ChainTests(unittest.TestCase):
         self.store.observe('friendly', {'observed_at': time.time(), 'members': [{'id': '1', 'name': 'Alice'}, {'id': '2', 'name': 'Bob'}]})
         self.store.observe('enemies', {'observed_at': time.time(), 'members': [{'id': '3', 'name': 'Enemy'}, {'id': '4', 'name': 'Other'}]})
         self.app = Flask(__name__, template_folder='../templates')
-        self.app.config.update(TESTING=True, CHAIN_PIN_HASH=generate_password_hash('12345'), CHAIN_COOKIE_SECURE=True)
+        self.app.config.update(TESTING=True, TACTICIAN_PIN_HASH=generate_password_hash('12345'), PUBLIC_PIN_HASH='', CHAIN_COOKIE_SECURE=True)
         self.app.context_processor(lambda: {'url_prefix': ''})
         register(self.app, self.store)
         self.client = self.app.test_client()
@@ -260,9 +260,10 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(response.status_code,429)
 
     def test_unknown_members_malformed_requests_and_unconfigured_pin(self):
-        self.app.config['CHAIN_PIN_HASH']=''
+        original = self.app.config['TACTICIAN_PIN_HASH']
+        self.app.config['TACTICIAN_PIN_HASH']=''
         self.assertEqual(self.post('unlock',{'pin':'12345'}).status_code,503)
-        self.app.config['CHAIN_PIN_HASH']=generate_password_hash('12345')
+        self.app.config['TACTICIAN_PIN_HASH']=original
         self.unlock()
         for body in ({}, {'version':self.version(),'attacker_id':'999','target_id':'3'},
                      {'version':self.version(),'attacker_id':'1','target_id':'3','allow_duplicate':'false'}):

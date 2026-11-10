@@ -242,10 +242,7 @@ def init_activity_db():
             create_activity_schema(connection)
         travel_learning.create_schema(connection)
         if not CHAIN_DB_PATH:
-            for statement in chain_coordinator.SCHEMA:
-                connection.execute(statement)
-            connection.execute("INSERT OR IGNORE INTO chain_queue VALUES (1, ?, ?, 0, 0, ?)",
-                               (FRIENDLY_FACTION_ID, FACTION_ID, time.time()))
+            chain_coordinator.create_schema(connection, FRIENDLY_FACTION_ID, FACTION_ID)
         # A previous process cannot vouch for the time while it was stopped.
         connection.execute("UPDATE activity_intervals SET is_open = 0 WHERE is_open = 1")
 

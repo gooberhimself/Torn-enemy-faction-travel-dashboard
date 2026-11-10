@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 _connect = sqlite3.connect
-with patch('sqlite3.connect', side_effect=lambda *args, **kwargs: _connect(':memory:')):
+with patch('sqlite3.connect', side_effect=lambda *args, **kwargs: _connect(':memory:')), \
+     patch('chain_auth.SessionAccess.synchronize_pins'):
     tracker = importlib.import_module('app')
 
 
@@ -66,7 +67,7 @@ class ChainIntegrationTests(unittest.TestCase):
         with patch.object(tracker,'URL_PREFIX','/example'):
             html=client.get('/chain',headers={'Host':'tracker.example.test'}).get_data(as_text=True)
         self.assertIn('data-api="/example/api/chain"',html)
-        self.assertIn('src="/example/static/chain.js?v=20261110-storage-errors"',html)
+        self.assertIn('src="/example/static/chain.js?v=20261110-role-access"',html)
         self.assertIn('href="/example/"',html)
         for path in ['/api/chain/state','/static/chain.js','/static/chain-time.js','/static/chain.css']:
             with client.get(path) as response:

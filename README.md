@@ -10,7 +10,7 @@ monitoring enemy travel, hospital releases, and online activity in Torn.
 - **One clear attack order:** a large NEXT ATTACK panel, followed by ON DECK and UPCOMING assignments.
 - **Live shared queue:** reorder by dragging or using touch/keyboard buttons; connected viewers see changes immediately.
 - **Fast manual control:** Complete & Next advances immediately; skip and restore assignments without marking them completed.
-- **Public viewing, protected editing:** viewers need no account or API key; coordinators unlock editing with a shared five-digit PIN.
+- **Two-PIN access:** viewers need no account or API key; public users can edit an unlocked board, and tacticians can edit and control the board lock.
 - **Target availability:** searchable faction rosters, current enemy locations, hospital release estimates, and direct Torn profile/attack links.
 - **Chain countdown:** updates every second locally, with preparation, attack-window, urgent, and critical warnings. It never initiates an attack.
 - **Optional attack verification:** match eligible faction attack records, confirm manual completions, and advance confirmed chain-extending attacks automatically.
@@ -44,8 +44,9 @@ Add any missing settings from `.env.example` without replacing your existing val
    `FRIENDLY_FACTION_ID` is the faction this instance serves, which need not be your own.
 2. Choose [manual or automatic verification](#choose-manual-or-automatic-verification).
    Set `CHAIN_VERIFY_ATTACKS=false` if your key cannot read that faction's attack history.
-3. Run `python scripts/hash_chain_pin.py`, enter and confirm your five-digit PIN,
-   and put the generated `CHAIN_PIN_HASH` line in `.env` to enable editing.
+3. As the server administrator, run `python scripts/hash_chain_pin.py public` and
+   `python scripts/hash_chain_pin.py tactician`. Choose different five-digit PINs and
+   put the generated `PUBLIC_PIN_HASH` and `TACTICIAN_PIN_HASH` lines in `.env`.
 4. For local HTTP testing, set `CHAIN_COOKIE_SECURE=false`. Keep it `true` when serving over HTTPS.
 5. Start the application:
 
@@ -53,8 +54,8 @@ Add any missing settings from `.env.example` without replacing your existing val
 python app.py
 ```
 
-Open `http://localhost:8787/chain` and select **Unlock Editing**. Anyone with access to
-that URL can view the queue without unlocking. Adjust the host and port for your deployment.
+Open `http://localhost:8787/chain` and select **Sign in**. Anyone with access to
+that URL can view the queue without signing in. Adjust the host and port for your deployment.
 SQLite tables initialize automatically; no separate database installation is required.
 
 | Page | Path |
@@ -128,18 +129,38 @@ No new Python dependencies are needed. Install the existing requirements, then r
 
 ```bash
 source venv/bin/activate
-python scripts/hash_chain_pin.py
+python scripts/hash_chain_pin.py public
+python scripts/hash_chain_pin.py tactician
 ```
 
-Enter and confirm your own five-digit PIN at the hidden prompts. Copy the printed
-`CHAIN_PIN_HASH='...'` line into the selected private `.env` / `ENV_FILE` and restart.
-The helper uses Werkzeug scrypt; the raw PIN is never written to a file or shell history.
-Treat the verifier as a secret too: a five-digit PIN has limited entropy. Do not commit
-it, your API key, or any local database. Leave `CHAIN_PIN_HASH` empty to disable unlocking.
+Choose a different five-digit PIN for each role at the hidden prompts. Copy the printed
+`PUBLIC_PIN_HASH='...'` and `TACTICIAN_PIN_HASH='...'` lines into the selected private
+`.env` / `ENV_FILE` and restart. The helper uses Werkzeug scrypt; the raw PIN is never
+written to a file or shell history. Leave a role's hash empty to disable that role.
+If both hashes verify the same PIN, sign-in is rejected until the administrator fixes it.
+
+**Upgrading from the single-PIN version:** replace `CHAIN_PIN_HASH` with the two role
+settings. The legacy setting is no longer used. The additive SQLite migration preserves
+assignments, attack history, and observations, but signs out legacy sessions because their
+old editing flag cannot safely identify either role. The board initially starts unlocked;
+its lock state persists across later restarts.
+
+| Access | Board unlocked | Board locked | Lock/unlock board | Change PINs |
+|---|---|---|---|---|
+| Anonymous viewer | View | View | No | No |
+| Public PIN session | View and edit | View only | No | No |
+| Tactician PIN session | View and edit | View and edit | Yes | No |
+
+Both authenticated roles can add, edit, delete, reorder, complete, skip, and restore
+assignments when their effective permissions allow editing. Locking the board retains
+public sessions; their editing access returns automatically on unlock if they have not
+expired. Any authenticated tactician may change the lock, regardless of who last set it.
+Automatic Torn reconciliation continues while the board is locked.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CHAIN_PIN_HASH` | empty | scrypt verifier produced by the helper |
+| `PUBLIC_PIN_HASH` | empty | Public role scrypt verifier; editing allowed only while unlocked |
+| `TACTICIAN_PIN_HASH` | empty | Tactician role scrypt verifier; editing and board-lock control |
 | `CHAIN_COOKIE_SECURE` | `true` | HTTPS-only cookie; use `false` only for local HTTP testing |
 | `CHAIN_VERIFY_ATTACKS` | `true` | Enable the additional faction attack-history request |
 | `ACTIVITY_DB_PATH` | `activity.db` beside app.py | Existing SQLite database, also stores coordinator tables |
@@ -170,7 +191,8 @@ stored in SQLite. PIN verifiers and session tokens are never included in public 
 
 ### Operating the queue
 
-1. Select **Unlock Editing** and enter the PIN. Multiple coordinators may unlock independently.
+1. Select **Sign in** and enter the public or tactician PIN. The header shows your role,
+   effective editing permission, and board lock state. Multiple users can sign in independently.
 2. Select **Add Assignment**, search the friendly roster, and select an enemy. The enemy
    picker shows status and location, with confirmed Okay members in Torn first. Hospitalized,
    traveling, and abroad members remain selectable. Status details show the last API timestamp.
@@ -183,22 +205,42 @@ stored in SQLite. PIN verifiers and session tokens are never included in public 
    to queued/deferred assignments; completed history is retained.
 5. Target reuse is prevented by default, including when restoring an assignment. Check
    the explicit reuse option when adding/editing if duplication is intentional.
-6. **Lock Editing** revokes this browser's session. Sessions also expire after 30 minutes
-   without user interaction. Viewer refreshes and SSE messages do not extend that time.
+6. Tacticians use **Lock board / Unlock board** to control public editing immediately
+   across connected browsers. A public user cannot change the lock, even through direct API calls.
+7. **Sign out** revokes only this browser's session and does not change the board lock.
+   Sessions also expire after 30 minutes without user interaction. An authenticated public
+   user can remain active while locked; automatic refreshes and SSE messages do not extend sessions.
 
-Queue mutations require server-side authorization and a per-session CSRF token. SQLite
-transactions, database constraints, a required queue version, and the expected head ID
-prevent silent overwrites and repeated advancement. Failed unlocks are limited to five
+Queue mutations check session role, credential generation, expiry, CSRF, and board permissions
+inside the same SQLite `BEGIN IMMEDIATE` transaction as the write. Board-lock changes use
+the same discipline and require a tactician role. Once a lock commits, a waiting public
+edit is rejected; an edit already holding the write transaction finishes before a waiting
+lock can commit. Version checks reject stale edits and lock changes instead of silently
+overwriting them. The expected head ID also prevents repeated advancement. Failed unlocks are limited to five
 per source address per 15 minutes, with an instance-wide limit of 25. These limits persist
 across restarts. Behind a proxy, addresses may share the same limit; the app deliberately
 does not trust arbitrary forwarded IP headers. HTTPS, restricted backend access, and file
 permissions on the database and environment files remain necessary. The public queue is
-visible to anyone with access to the site; the PIN restricts editing only.
+visible to anyone with access to the site; the PINs restrict editing and board-lock control.
 
-To revoke all coordinator sessions after changing a PIN, stop the instance, remove only
-rows from `chain_sessions` in the coordinator database using SQLite
-(`DELETE FROM chain_sessions;`), and restart.
-Do not delete the database to rotate the PIN; it contains tracking and queue history.
+### Administrator-only PIN rotation
+
+There is no web form or API endpoint for changing PINs. Neither role can change either
+PIN through the application. Only the server owner manages the private environment file.
+
+1. Run `python scripts/hash_chain_pin.py public` or `python scripts/hash_chain_pin.py tactician`.
+2. Replace only that role's hash in the instance's private `.env` / `ENV_FILE`.
+3. Restart the instance to load the new configuration. No database editing is needed.
+
+At startup, SQLite compares a fingerprint of each configured verifier with its persisted
+role configuration. A changed or removed verifier increments that role's credential
+generation and deletes its existing sessions. The other role's sessions and the board
+lock remain unchanged. An unchanged configuration survives restarts, subject to normal
+session expiry. Restoring an earlier verifier never revives previously invalidated sessions.
+PIN hashes remain in environment configuration; SQLite stores configuration fingerprints,
+role generations, and hashed session tokens, not the PINs. Hashes, fingerprints, and session
+tokens are excluded from public state and SSE events. Browser authentication uses no JWT
+or localStorage. Never commit private environment files or runtime databases.
 
 ### API observations and verification
 
@@ -258,7 +300,7 @@ a coordinator can complete/skip a queued item or leave completed evidence for re
 Run a separate process with a separate private environment file, port, and activity
 SQLite file for each faction. For example, create `.env.instance-b` from `.env.example`
 and configure its own faction IDs, `PORT=8788`, and an absolute `ACTIVITY_DB_PATH`.
-Choose a coordinator PIN for that instance and set `CHAIN_VERIFY_ATTACKS` for its key's access.
+Configure both role PINs for that instance and set `CHAIN_VERIFY_ATTACKS` for its key's access.
 
 ```bash
 ENV_FILE="$PWD/.env.instance-b" python app.py
@@ -283,7 +325,8 @@ file still belongs to the previous matchup; do not delete the activity database 
 
 ### Live updates, storage, and deployment
 
-`chain_coordinator.py` contains storage, authorization, HTTP routes and SSE;
+`chain_coordinator.py` contains queue storage, HTTP routes and SSE;
+`chain_auth.py` handles role sessions, authorization, and PIN-rotation tracking;
 `chain_torn.py` isolates the v2 adapter. SQLite stores one queue, assignments, audit events,
 observed attack IDs, coordinator snapshots, temporary sessions, and unlock attempts alongside
 the existing activity/travel tables by default, or in `CHAIN_DB_PATH` when configured.
@@ -297,7 +340,10 @@ check also catches commits from another connection. Heartbeats run every 15 seco
 reconnect automatically and refresh state every 30 seconds as a fallback; these reads never
 call Torn. Optimistic drag changes reconcile to server order, and failed requests restore
 confirmed order. Database queue versions protect edits while a separate revision also
-tracks observation changes.
+tracks observation and authorization changes. Lock events include the public board
+state; each browser computes its effective controls from its own session role, and
+Flask always checks permissions independently. Credential changes cause clients to
+refresh their session state without broadcasting anyone's private session data.
 
 The existing deployment is one Python process and one background poll thread per instance.
 Keep that model: importing `app` into an arbitrary WSGI worker does **not** start the poller,
@@ -310,7 +356,7 @@ For the supplied systemd/nginx deployment:
 
 1. Update code/dependencies and the instance's private environment file, preserving its
    `URL_PREFIX`, faction IDs, and unique `ACTIVITY_DB_PATH`.
-2. Configure the PIN verifier and keep `CHAIN_COOKIE_SECURE=true` behind HTTPS.
+2. Configure the two role PIN verifiers and keep `CHAIN_COOKIE_SECURE=true` behind HTTPS.
 3. Apply the SSE settings in `deploy/nginx.conf`: buffering/cache off and a 75-second
    read timeout. Preserve streaming in any additional reverse proxy or tunnel.
 4. Restart the existing instance service. Verify `/chain`, the ordinary dashboards,
@@ -326,7 +372,8 @@ node tests/test_chain_time.js
 ```
 
 The Python suite covers access control, CSRF, lockout, expiry, queue mutations, duplicate
-targets, simultaneous edits, persistence, SSE reconnects, and conservative reconciliation.
+targets, simultaneous edits and board locks, role permissions, independent PIN rotation,
+legacy schema migration, persistence, SSE reconnects, and conservative reconciliation.
 The dependency-free Node tests check countdown synchronization, warning boundaries, hospital
 expiry, invalid timestamps, and stale observations. Node is needed only for these JS tests.
 
@@ -483,5 +530,5 @@ The browser refreshes dashboard data every 30 seconds. The server-side Torn API 
 - Arrival countdowns are estimates because Torn does not expose enemy flight arrival timestamps.
 - Enemy travel observations, flight checkpoints, and activity history persist in `activity.db`. Friendly arrival estimates and recent status changes remain in memory.
 - SQLite support comes from Python's standard library. The activity feature adds no Python package dependencies and requires no one-time initialization command.
-- Dashboard and queue viewing are public to anyone who can reach the site. The coordinator PIN protects editing only; use deployment access controls if viewing should be private.
+- Dashboard and queue viewing are public to anyone who can reach the site. The role PINs protect editing and board-lock control; use deployment access controls if viewing should be private.
 - Never commit or share your Torn API key.
