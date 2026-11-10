@@ -264,10 +264,10 @@ Choose a coordinator PIN for that instance and set `CHAIN_VERIFY_ATTACKS` for it
 ENV_FILE="$PWD/.env.instance-b" python app.py
 ```
 
-An existing deployment named `.env.combat-syndicate` is launched the same way:
+For a deployment using a custom file such as `.env.faction-name`:
 
 ```bash
-ENV_FILE="$PWD/.env.combat-syndicate" python app.py
+ENV_FILE="$PWD/.env.faction-name" python app.py
 ```
 
 Environment files and SQLite databases stay local and are excluded from Git. Exported
