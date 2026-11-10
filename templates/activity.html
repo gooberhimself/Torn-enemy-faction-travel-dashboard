@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Enemy Activity</title>
-  <link rel="stylesheet" href="/static/style.css?v=20260818-activity">
+  <link rel="stylesheet" href="{{ url_prefix }}/static/style.css?v=20260818-activity">
 </head>
 <body class="activity-page">
   <header>
     <div class="header-row">
       <h1>Enemy Activity</h1>
-      <nav><a href="/">Travel</a><a href="/hospital">Hospital</a><a href="/friendly">Friendly Travel</a><a href="/friendly/hospital">Friendly Hospital</a></nav>
+      <nav><a href="{{ url_prefix }}/">Travel</a><a href="{{ url_prefix }}/hospital">Hospital</a><a href="{{ url_prefix }}/friendly">Friendly Travel</a><a href="{{ url_prefix }}/friendly/hospital">Friendly Hospital</a><a href="{{ url_prefix }}/chain">Chain Coordinator</a></nav>
     </div>
     <div id="activityUpdated">Loading…</div>
     <div id="error"></div>
@@ -69,7 +69,7 @@ async function loadActivity(dateString = ''){
   try {
     const params = new URLSearchParams({timezone: viewerTimezone});
     if(dateString) params.set('date', dateString);
-    const url = `/api/activity?${params.toString()}`;
+    const url = {{ (url_prefix ~ '/api/activity')|tojson }} + `?${params.toString()}`;
     const response = await fetch(url, {cache:'no-store'});
     const payload = await response.json();
     if(!response.ok) throw new Error(payload.error || `Activity request failed (${response.status})`);

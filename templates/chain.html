@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chain Coordinator · Torn Enemy Tracker</title>
+  <link rel="stylesheet" href="{{ url_prefix }}/static/style.css">
+  <link rel="stylesheet" href="{{ url_prefix }}/static/chain.css">
+  <script defer src="{{ url_prefix }}/static/chain-time.js"></script>
+  <script defer src="{{ url_prefix }}/static/chain.js?v=20261110-storage-errors"></script>
+</head>
+<body class="chain-page" data-api="{{ url_prefix }}/api/chain">
+  <header>
+    <div class="header-row"><h1>Chain Coordinator</h1><nav aria-label="Main navigation">
+      <a href="{{ url_prefix }}/">Enemy Travel</a><a href="{{ url_prefix }}/hospital">Hospital</a>
+      <a href="{{ url_prefix }}/activity">Activity</a><a href="{{ url_prefix }}/friendly">Friendly Travel</a>
+    </nav></div>
+    <div class="toolbar"><span id="mode" class="badge">Read-only</span><button id="access">Unlock Editing</button><span id="connection" class="muted" role="status">Connecting…</span></div>
+  </header>
+  <main>
+    <p id="error" role="alert" hidden></p>
+    <section class="chain-summary" aria-label="Chain status">
+      <div><span class="eyebrow">CHAIN COUNT</span><strong id="chain-count">—</strong></div>
+      <div id="clock-panel"><span class="eyebrow">ESTIMATED TIME REMAINING</span><strong id="chain-clock">—</strong><span id="warning">Unavailable</span></div>
+      <div><span id="chain-status">Waiting for API</span><small id="chain-updated">No confirmed update</small><small id="api-health"></small></div>
+    </section>
+    <p class="muted advisory">Sequential attacks. Timer warnings are advisory; the coordinator decides when to attack.</p>
+    <section id="next" class="next-panel" aria-label="Next attack"><h2>NEXT ATTACK</h2><p>No assignments yet.</p></section>
+    <div class="section-heading"><h2>Attack queue</h2><button id="add" class="primary" hidden>+ Add Assignment</button></div>
+    <p class="muted advisory">One attacker at a time. Coordinators can drag to reorder, or use the ↑ and ↓ buttons.</p>
+    <ol id="queue" class="queue" aria-label="Ordered attack queue"></ol>
+    <details class="history"><summary>Completed attacks <span id="completed-count"></span></summary><div id="completed"></div></details>
+    <details class="history"><summary>Skipped / deferred <span id="deferred-count"></span></summary><div id="deferred"></div></details>
+    <section aria-labelledby="availability-heading"><h2 id="availability-heading">Enemy availability</h2><p id="roster-updated" class="muted advisory"></p>
+      <div class="availability"><div><h3>Confirmed Okay in Torn</h3><div id="available"></div></div>
+      <div><h3>Hospital releases · next 5 minutes</h3><div id="releasing"></div></div></div>
+    </section>
+  </main>
+  <dialog id="pin-dialog" aria-labelledby="pin-title"><form id="pin-form">
+    <h2 id="pin-title">Coordinator Access</h2><label for="pin">Enter your 5-digit PIN</label>
+    <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" required autocomplete="off">
+    <p id="pin-error" role="alert"></p><div class="actions"><button type="button" data-close="pin-dialog">Cancel</button><button class="primary">Unlock</button></div>
+  </form></dialog>
+  <dialog id="assignment-dialog" aria-labelledby="assignment-title"><form id="assignment-form">
+    <h2 id="assignment-title">Add Assignment</h2>
+    <label for="attacker-search">Friendly faction member</label><input id="attacker-search" type="search" placeholder="Search friendly members" autocomplete="off">
+    <select id="attacker" size="4" required aria-label="Friendly faction member"></select>
+    <label for="target-search">Enemy faction member</label><input id="target-search" type="search" placeholder="Search enemies by name or ID" autocomplete="off">
+    <select id="target" size="5" required aria-label="Enemy faction member"></select>
+    <div id="target-preview" class="muted"></div>
+    <label class="check"><input type="checkbox" id="reuse"> Allow this target in multiple active queue positions</label>
+    <p id="assignment-error" role="alert"></p><div class="actions"><button type="button" data-close="assignment-dialog">Cancel</button><button class="primary">Save Assignment</button></div>
+  </form></dialog>
+</body>
+</html>

@@ -3,6 +3,7 @@ import re
 import sqlite3
 import time
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from html.parser import HTMLParser
 from threading import Lock, Thread
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -11,8 +12,14 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
 import travel_learning
+import chain_coordinator
+import chain_torn
 
-load_dotenv()
+# An explicit file keeps each instance independent; otherwise retain .env behavior.
+ENV_FILE = os.getenv("ENV_FILE")
+if ENV_FILE and not os.path.isfile(ENV_FILE):
+    raise RuntimeError(f"Environment file does not exist: {ENV_FILE}")
+load_dotenv(dotenv_path=ENV_FILE)
 
 API_KEY = os.getenv("TORN_API_KEY", "").strip()
 FACTION_ID = os.getenv("ENEMY_FACTION_ID", "").strip()
@@ -20,7 +27,17 @@ FRIENDLY_FACTION_ID = os.getenv("FRIENDLY_FACTION_ID", "").strip()
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "60"))
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8787"))
-ACTIVITY_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "activity.db")
+URL_PREFIX = os.getenv("URL_PREFIX", "").rstrip("/")
+# These hosts continue to serve this instance at /, even with URL_PREFIX set.
+ROOT_URL_HOSTS = {
+    host.strip().lower() for host in os.getenv(
+        "ROOT_URL_HOSTS", ""
+    ).split(",") if host.strip()
+}
+ACTIVITY_DB_PATH = os.getenv("ACTIVITY_DB_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "activity.db"
+)
+CHAIN_DB_PATH = os.getenv("CHAIN_DB_PATH", "").strip()
 
 
 def detect_server_timezone():
@@ -45,6 +62,14 @@ if not API_KEY or not FACTION_ID or not FRIENDLY_FACTION_ID:
     print("Missing TORN_API_KEY, ENEMY_FACTION_ID, or FRIENDLY_FACTION_ID. Copy .env.example to .env and edit it.")
 
 app = Flask(__name__)
+
+@app.context_processor
+def inject_url_prefix():
+    hostname = request.host.partition(":")[0].lower()
+    # Direct backend access has no nginx to strip the configured prefix.
+    direct_access = request.host.rpartition(":")[2] == str(PORT)
+    return {"url_prefix": "" if direct_access or hostname in ROOT_URL_HOSTS else URL_PREFIX}
+
 lock = Lock()
 
 
@@ -88,26 +113,27 @@ COUNTRY_ALIASES = {
 # unsafe, because they are headed back to Torn.
 UNSAFE_DESTINATION_STATES = {"Traveling", "Abroad", "Hospital"}
 
-# One-way base travel times in seconds. When Torn does not expose an enemy's
-# arrival timestamp, the dashboard adds the route time to the first poll where
-# that flight is observed. The resulting ETA can be late by up to one poll.
+# Standard one-way travel times without the book, in seconds, from the wiki
+# table shared with enemy travel learning. Used for friendly flights and enemies
+# with no inferred method. Estimates start at first observation; actual departure
+# time and flight-time variance remain uncertain.
 TRAVEL_SECONDS = {
-    "Mexico": 1600,
-    "Cayman Islands": 2100,
-    "Canada": 2500,
-    "Hawaii": 8100,
-    "United Kingdom": 9600,
-    "Argentina": 10000,
-    "Switzerland": 10500,
-    "Japan": 13500,
-    "China": 14500,
-    "UAE": 16200,
-    "South Africa": 17800,
+    destination: times["Standard"]
+    for destination, times in travel_learning.TRAVEL_TIMES.items()
 }
 
 
 def activity_db():
     connection = sqlite3.connect(ACTIVITY_DB_PATH, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def chain_db():
+    if not CHAIN_DB_PATH:
+        return activity_db()
+    connection = sqlite3.connect(CHAIN_DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
@@ -215,6 +241,11 @@ def init_activity_db():
         else:
             create_activity_schema(connection)
         travel_learning.create_schema(connection)
+        if not CHAIN_DB_PATH:
+            for statement in chain_coordinator.SCHEMA:
+                connection.execute(statement)
+            connection.execute("INSERT OR IGNORE INTO chain_queue VALUES (1, ?, ?, 0, 0, ?)",
+                               (FRIENDLY_FACTION_ID, FACTION_ID, time.time()))
         # A previous process cannot vouch for the time while it was stopped.
         connection.execute("UPDATE activity_intervals SET is_open = 0 WHERE is_open = 1")
 
@@ -389,7 +420,7 @@ init_activity_db()
 def api_get_faction_basic(faction_id):
     # Torn v1 endpoint remains widely used for faction basic/member status data.
     url = f"https://api.torn.com/faction/{faction_id}"
-    params = {"selections": "basic", "key": API_KEY}
+    params = {"selections": "basic,timestamp", "key": API_KEY}
     r = requests.get(url, params=params, timeout=20)
     r.raise_for_status()
     data = r.json()
@@ -398,13 +429,31 @@ def api_get_faction_basic(faction_id):
     return data
 
 
+class StatusTextParser(HTMLParser):
+    """Extract readable text from API markup; templates still escape the result."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def plain_status_text(value):
+    parser = StatusTextParser()
+    parser.feed(value)
+    parser.close()
+    return "".join(parser.parts)
+
+
 def classify_member(member_id, member):
     status = member.get("status") or {}
     last_action = member.get("last_action") or {}
     desc = str(status.get("description") or "")
     details = str(status.get("details") or "")
     state_name = str(status.get("state") or "")
-    combined = " | ".join(x for x in [state_name, desc, details] if x)
+    combined = " | ".join(plain_status_text(x) for x in [state_name, desc, details] if x)
 
     travel_state = "Other"
     destination = ""
@@ -413,27 +462,23 @@ def classify_member(member_id, member):
     # Check the mutually exclusive states in priority order. A traveling status
     # normally includes a country name, but that does not mean the member has
     # already arrived abroad.
-    text = combined.lower()
+    # Details can contain attacker names and profile links, not location evidence.
+    # Keep them in status_text for display, but classify only state/description.
+    text = " | ".join([state_name, desc]).lower()
+    for country in COUNTRIES:
+        aliases = COUNTRY_ALIASES.get(country, [country.lower()])
+        if any(re.search(r"\b" + re.escape(alias) + r"\b", text) for alias in aliases):
+            destination = country
+            break
+
     if "hospital" in text:
         travel_state = "Hospital"
     elif "return" in text or re.search(r"\bto torn\b", text):
         travel_state = "Returning"
     elif "travel" in text:
         travel_state = "Traveling"
-    elif "abroad" in text or any(c.lower() in text for c in COUNTRIES):
+    elif "abroad" in text or destination:
         travel_state = "Abroad"
-
-    for country in COUNTRIES:
-        aliases = COUNTRY_ALIASES.get(country, [country.lower()])
-        if any(alias in text for alias in aliases):
-            destination = country
-            break
-
-    # Try phrases like "to Japan" or "in Switzerland" if Torn changes formatting.
-    if not destination:
-        match = re.search(r"\b(?:to|in|from)\s+([A-Z][A-Za-z ]+)", combined)
-        if match:
-            destination = match.group(1).strip()
 
     until = status.get("until") or 0
     try:
@@ -519,12 +564,39 @@ def update_runtime_state(runtime_state, data, track_activity=False):
         runtime_state["changes"] = (new_changes + runtime_state["changes"])[:50]
 
 
+def publish_chain_observation(kind, data=None, error=None):
+    try:
+        coordinator.observe(kind, data, error)
+    except chain_coordinator.QueueError as exc:
+        app.logger.error("Coordinator snapshot unavailable: %s", exc.message)
+    except Exception:
+        app.logger.error("Coordinator snapshot unavailable; existing tracking continues.")
+
+
+def publish_chain_roster(kind, runtime_state, data):
+    observed = data.get("timestamp")
+    if type(observed) is not int or observed <= 0 or observed > time.time() + 5:
+        publish_chain_observation(kind, error="Roster has no valid API timestamp; awaiting confirmation.")
+        return
+    with lock:
+        members = [{"id": m["id"], "name": m["name"], "status": m["api_state"],
+                    "status_text": m["status_text"], "in_torn": is_known_in_torn(m),
+                    "location": "Torn" if is_known_in_torn(m) else m["destination"] or ("Unknown" if m["state"] == "Other" else m["state"]),
+                    "hospital_until": m["until"] if m["api_state"] == "Hospital" and m["until"] > 0 else None,
+                    "observed_at": observed} for m in runtime_state["members"]]
+    publish_chain_observation(kind, {"members": members, "observed_at": observed})
+
+
 def poll_once():
-    update_runtime_state(state, api_get_faction_basic(FACTION_ID), track_activity=True)
+    data = api_get_faction_basic(FACTION_ID)
+    update_runtime_state(state, data, track_activity=True)
+    publish_chain_roster("enemies", state, data)
 
 
 def poll_friendly_once():
-    update_runtime_state(friendly_state, api_get_faction_basic(FRIENDLY_FACTION_ID))
+    data = api_get_faction_basic(FRIENDLY_FACTION_ID)
+    update_runtime_state(friendly_state, data)
+    publish_chain_roster("friendly", friendly_state, data)
 
 
 def poll_loop():
@@ -535,9 +607,19 @@ def poll_loop():
         ):
             try:
                 poller()
-            except Exception as e:
+            except Exception:
                 with lock:
-                    runtime_state["error"] = str(e)
+                    runtime_state["error"] = "Faction API update failed. Check server configuration and API permissions."
+                publish_chain_observation("enemies" if runtime_state is state else "friendly",
+                                    error="Faction status update failed; showing last confirmed data.")
+        try:
+            chain_torn.poll(coordinator, API_KEY, FRIENDLY_FACTION_ID,
+                            verify=os.getenv("CHAIN_VERIFY_ATTACKS", "true").lower() != "false")
+        except chain_coordinator.QueueError as exc:
+            app.logger.error("Chain polling stopped for this cycle: %s", exc.message)
+        except Exception:
+            # A malformed response or temporary storage problem must not stop tracking.
+            app.logger.error("Chain polling failed; manual queue remains available.")
         time.sleep(max(POLL_SECONDS, 30))
 
 
@@ -651,6 +733,15 @@ def api_status():
 @app.route("/api/friendly/status")
 def api_friendly_status():
     return jsonify(status_payload(friendly_state, include_safety=False))
+
+
+coordinator = chain_coordinator.Coordinator(
+    chain_db, lambda: (FRIENDLY_FACTION_ID, FACTION_ID),
+    stale_seconds=max(POLL_SECONDS, 30) * 2 + 30,
+)
+if CHAIN_DB_PATH:
+    coordinator.initialize()
+chain_coordinator.register(app, coordinator)
 
 
 if __name__ == "__main__":

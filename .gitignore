@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+instructions.txt
 
 # Python-generated files
 __pycache__/
@@ -12,6 +13,10 @@ __pycache__/
 activity.db
 activity.db-shm
 activity.db-wal
+activity-*.db
+activity-*.db-shm
+activity-*.db-wal
+activity-*.db-journal
 
 # Virtual environments
 .venv/
@@ -22,3 +27,11 @@ env/
 .vscode/
 .idea/
 .DS_Store
+
+# Coordinator shares the configured SQLite database; exclude all local DB variants.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*

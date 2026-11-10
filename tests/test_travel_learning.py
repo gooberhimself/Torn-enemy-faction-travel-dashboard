@@ -14,6 +14,72 @@ with patch('sqlite3.connect', side_effect=lambda *args, **kwargs: _connect(':mem
     app = importlib.import_module('app')
 
 
+class ClassificationTests(unittest.TestCase):
+    def classify(self, state, description, details=""):
+        return app.classify_member('123', {'status': {
+            'state': state, 'description': description, 'details': details,
+        }})
+
+    def test_attacker_details_do_not_set_location_or_state(self):
+        for name in ('Prouki', 'UK', 'Japan', 'Returning', 'Hospital'):
+            details = f'Attacked by <a href="http://www.torn.com/profiles.php?XID=4168740">{name}</a>'
+            for state, desc, expected in (
+                ('Hospital', 'In hospital for 10 mins', 'Hospital'),
+                ('Okay', 'Okay', 'Other'),
+            ):
+                with self.subTest(name=name, state=state):
+                    member = self.classify(state, desc, details)
+                    self.assertEqual(member['state'], expected)
+                    self.assertEqual(member['destination'], '')
+                    self.assertIn(f'Attacked by {name}', member['status_text'])
+                    self.assertNotIn('<a', member['status_text'])
+                    self.assertEqual(member['travel_api_info']['status']['details'], details)
+
+    def test_hospital_link_is_displayed_as_plain_name(self):
+        member = self.classify('Hospital', 'In a Chinese hospital for 2 hrs 44 mins',
+                              'Hospitalized by <a href = "http://www.torn.com/profiles.php?XID=3426361">simonnjr</a>')
+        self.assertEqual(member['status_text'],
+                         'Hospital | In a Chinese hospital for 2 hrs 44 mins | Hospitalized by simonnjr')
+        self.assertEqual(member['destination'], 'China')
+
+    def test_status_markup_and_entities(self):
+        member = self.classify('Hospital', 'In hospital',
+                              'Attacked by <a href="https://example.com"><b>Alice &amp; Bob</b></a>')
+        self.assertEqual(member['status_text'], 'Hospital | In hospital | Attacked by Alice & Bob')
+        self.assertEqual(self.classify('Hospital', 'In hospital', 'Unknown attacker')['status_text'],
+                         'Hospital | In hospital | Unknown attacker')
+
+    def test_country_aliases_require_whole_words(self):
+        member = self.classify('Hospital', 'In hospital after an attack by Prouki')
+        self.assertEqual(member['destination'], '')
+
+    def test_foreign_hospital_aliases(self):
+        for country, aliases in app.COUNTRY_ALIASES.items():
+            for alias in aliases:
+                with self.subTest(country=country, alias=alias):
+                    member = self.classify('Hospital', f'In a {alias.upper()} hospital', 'Attacked by UK')
+                    self.assertEqual(member['state'], 'Hospital')
+                    self.assertEqual(member['destination'], country)
+
+    def test_travel_directions_and_abroad_locations(self):
+        for country in app.COUNTRIES:
+            for state, desc, expected in (
+                ('Traveling', f'Traveling from Torn to {country}', 'Traveling'),
+                ('Traveling', f'Traveling from {country} to Torn', 'Returning'),
+                ('Returning', f'Returning from {country}', 'Returning'),
+                ('Abroad', f'In {country}', 'Abroad'),
+            ):
+                with self.subTest(country=country, desc=desc):
+                    member = self.classify(state, desc, 'Attacked by UK')
+                    self.assertEqual(member['state'], expected)
+                    self.assertEqual(member['destination'], country)
+
+    def test_home_and_unknown_locations_are_not_foreign_destinations(self):
+        for desc in ('In Torn hospital', 'In Torn City', 'In Unknown Place'):
+            with self.subTest(desc=desc):
+                self.assertEqual(self.classify('Hospital', desc)['destination'], '')
+
+
 class TravelTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

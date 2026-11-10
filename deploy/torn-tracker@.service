@@ -1,0 +1,17 @@
+[Unit]
+Description=Torn travel tracker (%i)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=tracker
+WorkingDirectory=/opt/torn-tracker
+Environment=ENV_FILE=/opt/torn-tracker/.env.%i
+ExecStart=/opt/torn-tracker/venv/bin/python -u /opt/torn-tracker/app.py
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
